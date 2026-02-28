@@ -216,7 +216,9 @@ setup() {
 # =========================================================================
 
 @test "debian/rules: starts with make shebang" {
-    head -1 "$DEBIAN_DIR/rules" | grep -q "#!/usr/bin/make -f"
+    run head -1 "$DEBIAN_DIR/rules"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"#!/usr/bin/make -f"* ]]
 }
 
 @test "debian/rules: uses debhelper" {
@@ -241,7 +243,9 @@ setup() {
 # =========================================================================
 
 @test "debian/changelog: has correct package name" {
-    head -1 "$DEBIAN_DIR/changelog" | grep -q "^tarzst "
+    run head -1 "$DEBIAN_DIR/changelog"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "tarzst "* ]]
 }
 
 @test "debian/changelog: has version 3.1" {
@@ -290,7 +294,9 @@ setup() {
     assert_symlink "${install_root}/usr/bin/zstar" "tarzst"
 
     # Verify the installed binary is a bash script
-    head -1 "${install_root}/usr/bin/tarzst" | grep -q "#!/bin/bash"
+    run head -1 "${install_root}/usr/bin/tarzst"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"#!/bin/bash"* ]]
 
     rm -rf "$install_root"
 }
