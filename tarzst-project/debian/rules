@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Nothing to build; this is a shell script.
+
+override_dh_auto_test:
+	# Tests require external tools; skip during package build.
+
+override_dh_auto_install:
+	install -D -m 0755 tarzst.sh debian/tarzst/usr/bin/tarzst
+	ln -s tarzst debian/tarzst/usr/bin/zstar

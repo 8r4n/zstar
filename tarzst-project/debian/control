@@ -1,0 +1,20 @@
+Source: tarzst
+Section: utils
+Priority: optional
+Maintainer: 8r4n <8r4n@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/8r4n/zstar
+Rules-Requires-Root: no
+
+Package: tarzst
+Architecture: all
+Depends: ${misc:Depends}, bash (>= 4.0), tar, zstd, coreutils, gnupg2
+Recommends: pv
+Description: A professional utility for creating secure, verifiable, and automated tar archives
+ tarzst is a powerful, robust command-line wrapper script for creating
+ compressed, verifiable, splittable, and secure tar archives. It integrates
+ tar, zstd, and GPG into a seamless workflow with advanced features including
+ strict error checking, automatic dependency checking, password protection,
+ GPG signing/encryption, file splitting, and self-contained decompression
+ script generation.
