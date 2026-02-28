@@ -7,6 +7,9 @@
 test/artifacts/tmp/
 test/tmp/
 
+# ----- Test dependencies (bats-core) -----
+test/lib/
+
 # ----- Build/run artifacts -----
 # Output archives, checksums, decompression scripts, and split parts
 artifacts/tmp/
