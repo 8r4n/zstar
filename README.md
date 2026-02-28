@@ -43,6 +43,8 @@
 - [Exit Codes](#exit-codes)
 - [RPM Packaging](#rpm-packaging)
 - [Nix / NixOS Packaging](#nix--nixos-packaging)
+- [Homebrew (macOS)](#homebrew-macos)
+- [Debian / Ubuntu Packaging](#debian--ubuntu-packaging)
 - [Running the Test Suite](#running-the-test-suite)
   - [Test Prerequisites](#test-prerequisites)
   - [Running Tests](#running-tests)
@@ -704,6 +706,60 @@ nixpkgs.overlays = [ tarzst.overlays.default ];
 ```
 
 The Nix package installs `tarzst` and a convenience symlink `zstar`, with core runtime dependencies automatically available on `PATH`. Some optional features (such as `--nixos-iso` or `--encrypted-tmpfs`) may require additional tools like `git`, `cryptsetup`, `mkfs.ext4`, or `mountpoint` to be installed separately.
+
+---
+
+## Homebrew (macOS)
+
+A [Homebrew formula](Formula/tarzst.rb) is provided for macOS users.
+
+### Install from a local tap
+
+```bash
+# From a local clone of this repository
+brew install --formula Formula/tarzst.rb
+```
+
+### Install from a tap
+
+If this repository is configured as a Homebrew tap:
+
+```bash
+brew tap 8r4n/zstar https://github.com/8r4n/zstar
+brew install tarzst
+```
+
+The formula installs `tarzst` and a convenience symlink `zstar`. Dependencies (`zstd`, `gnupg`, `coreutils`, and `bash`) are installed automatically by Homebrew.
+
+---
+
+## Debian / Ubuntu Packaging
+
+Debian packaging files are provided in [tarzst-project/debian/](tarzst-project/debian/) for building `.deb` packages on Debian and Ubuntu systems.
+
+### Build the .deb package
+
+```bash
+cd tarzst-project
+
+# Install build dependencies
+sudo apt-get install debhelper dpkg-dev
+
+# Build the package
+dpkg-buildpackage -us -uc -b
+```
+
+### Install the .deb package
+
+```bash
+# The .deb file is created in the parent directory
+sudo dpkg -i ../tarzst_3.1_all.deb
+
+# Install any missing dependencies
+sudo apt-get install -f
+```
+
+The `.deb` package installs `/usr/bin/tarzst` and a convenience symlink `/usr/bin/zstar`.
 
 ---
 
