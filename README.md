@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/zstar-logo.png" alt="zstar logo" width="180" />
+</div>
+
 # zstar — Secure, Verifiable Tar + Zstd Archiving
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
