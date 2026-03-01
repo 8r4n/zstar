@@ -16,6 +16,9 @@ Group:      Applications/System
 License:    MIT
 URL:        https://github.com/user/tarzst
 Source0:    tarzst.sh
+Source1:    zstar.te
+Source2:    zstar.fc
+Source3:    zstar.if
 
 # No architecture is required as it's a shell script
 BuildArch:  noarch
@@ -28,6 +31,9 @@ Requires:   coreutils
 Requires:   gnupg2
 # 'pv' is an optional dependency for the progress bar, so we use Recommends.
 Recommends: pv
+# SELinux policy tools are optional; labeling is a no-op without them.
+Recommends: policycoreutils
+Recommends: selinux-policy-devel
 
 %description
 tarzst is a powerful, robust command-line wrapper script for creating
@@ -48,9 +54,16 @@ features including:
 # The %prep section is for preparing the source code.
 %setup -q -c -T
 cp %{SOURCE0} .
+cp %{SOURCE1} .
+cp %{SOURCE2} .
+cp %{SOURCE3} .
 
 %build
 # As this is a shell script, no build steps are necessary.
+# Build the SELinux policy module if selinux-policy-devel is available.
+%if 0%{?fedora} || 0%{?rhel} || 0%{?centos}
+%global with_selinux 1
+%endif
 
 %install
 # The %install section describes how to install the files into a temporary
@@ -65,11 +78,32 @@ install -m 0755 tarzst.sh %{buildroot}%{_bindir}/tarzst
 # The link target is relative, making the package more robust.
 ln -s tarzst %{buildroot}%{_bindir}/zstar
 
+# Install the SELinux policy source files for reference.
+install -d -m 0755 %{buildroot}%{_datadir}/selinux/packages/zstar
+install -m 0644 zstar.te %{buildroot}%{_datadir}/selinux/packages/zstar/zstar.te
+install -m 0644 zstar.fc %{buildroot}%{_datadir}/selinux/packages/zstar/zstar.fc
+install -m 0644 zstar.if %{buildroot}%{_datadir}/selinux/packages/zstar/zstar.if
+
+%post
+# Build and install the SELinux policy module if tools are available.
+if [ -f /usr/share/selinux/devel/Makefile ] && command -v semodule &>/dev/null; then
+    cd %{_datadir}/selinux/packages/zstar 2>/dev/null && \
+        make -f /usr/share/selinux/devel/Makefile zstar.pp 2>/dev/null && \
+        semodule -i zstar.pp 2>/dev/null || true
+fi
+
+%preun
+# Remove the SELinux policy module on package removal.
+if [ "$1" -eq 0 ] && command -v semodule &>/dev/null; then
+    semodule -r zstar 2>/dev/null || true
+fi
+
 %files
 # The %files section lists all files owned by the package.
 # We must include both the main executable and the new symlink.
 %{_bindir}/tarzst
 %{_bindir}/zstar
+%{_datadir}/selinux/packages/zstar/
 
 %changelog
 * Mon Feb 23 2026 Your Name <your.email@example.com> - 3.1-2

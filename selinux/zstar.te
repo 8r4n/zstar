@@ -1,0 +1,62 @@
+policy_module(zstar, 1.0.0)
+
+########################################
+# Type declarations
+########################################
+
+type zstar_archive_t;
+files_type(zstar_archive_t)
+
+type zstar_mcp_t;
+type zstar_exec_t;
+application_domain(zstar_mcp_t, zstar_exec_t)
+
+type zstar_tmp_t;
+files_tmp_file(zstar_tmp_t)
+
+########################################
+# zstar_mcp_t policy — archive access
+########################################
+
+# Allow the MCP server to create, read, write, and delete zstar archives.
+allow zstar_mcp_t zstar_archive_t:file { create read write getattr setattr
+                                          unlink rename open append };
+allow zstar_mcp_t zstar_archive_t:dir  { search read write add_name
+                                          remove_name getattr open };
+
+# Allow the MCP server to execute decompress scripts (zstar_archive_t).
+allow zstar_mcp_t zstar_archive_t:file { execute execute_no_trans };
+
+# Allow the MCP server to create and manage temporary files.
+allow zstar_mcp_t zstar_tmp_t:file { create read write getattr unlink open };
+
+########################################
+# zstar_mcp_t policy — required system access
+########################################
+
+# Execute system utilities needed by tarzst.sh.
+corecmd_exec_bin(zstar_mcp_t)
+corecmd_exec_shell(zstar_mcp_t)
+
+# DNS resolution for network streaming.
+sysnet_dns_name_resolve(zstar_mcp_t)
+
+# Basic network client (for --net-stream outbound connections).
+corenet_tcp_connect_all_ports(zstar_mcp_t)
+
+# Basic network server (for listen mode inbound connections).
+corenet_tcp_bind_all_ports(zstar_mcp_t)
+
+# Read generic /etc files, /proc, locale data.
+files_read_etc_files(zstar_mcp_t)
+kernel_read_system_state(zstar_mcp_t)
+miscfiles_read_localization(zstar_mcp_t)
+
+# Use GPG (access to ~/.gnupg).
+gpg_entry_type(zstar_mcp_t)
+
+# Stdio transport — read/write inherited stdin/stdout/stderr file descriptors.
+allow zstar_mcp_t self:fifo_file { read write getattr };
+
+# Deny everything else — this is implicit in SELinux but stated for clarity.
+# Any access not explicitly allowed above will be denied and logged (AVC denial).
