@@ -436,13 +436,13 @@ main() {
           read -r GPG_PASSPHRASE
       fi
       echo "$GPG_PASSPHRASE" > "$passphrase_file"
-      gpg_cmd+=("gpg" "--batch" "--pinentry-mode" "loopback" "--passphrase-file" "$passphrase_file" "--local-user" "$SIGNING_KEY_ID")
+      gpg_cmd+=("gpg" "--batch" "--pinentry-mode" "loopback" "--passphrase-file" "$passphrase_file" "--output" "-" "--local-user" "$SIGNING_KEY_ID")
       if [ -n "$RECIPIENT_KEY_ID" ]; then
           echo "--> Signing with key '$SIGNING_KEY_ID' and encrypting for recipient '$RECIPIENT_KEY_ID'."
           # Use --sign and --encrypt together
           gpg_cmd+=("-r" "$RECIPIENT_KEY_ID" "--encrypt" "--sign")
       else
-          # Creates a detached signature by default with --sign
+          # Creates an embedded signed message (signed, not encrypted)
           echo "--> Signing archive with key '$SIGNING_KEY_ID'."
           gpg_cmd+=("--sign")
       fi
@@ -457,7 +457,7 @@ main() {
           read -r GPG_PASSPHRASE
       fi
       echo "$GPG_PASSPHRASE" > "$passphrase_file"
-      gpg_cmd+=("gpg" "--batch" "--pinentry-mode" "loopback" "--passphrase-file" "$passphrase_file" "--symmetric" "--cipher-algo" "AES256")
+      gpg_cmd+=("gpg" "--batch" "--pinentry-mode" "loopback" "--passphrase-file" "$passphrase_file" "--output" "-" "--symmetric" "--cipher-algo" "AES256")
   fi
 
   # --- Step 5: Construct and Run the Main Pipeline ---
@@ -500,7 +500,7 @@ main() {
   local checksum_file="${OUTPUT_BASE}${final_ext}.sha512"
   # Note: We already changed to input_dir on line 242, no need to cd again
   
-  local -a tar_cmd=("tar" "-cvf" "-" "${TAR_EXCLUDE_ARGS[@]}" "--" "${relative_inputs[@]}")
+  local -a tar_cmd=("tar" "-cf" "-" "${TAR_EXCLUDE_ARGS[@]}" "--" "${relative_inputs[@]}")
   local -a zstd_cmd=("zstd" "-T0" "-${COMPRESSION_LEVEL}")
   
   local pipeline_str="${tar_cmd[*]} | ${PV_CMD} | ${zstd_cmd[*]}"
