@@ -788,7 +788,7 @@ SPLIT_LIMIT=$((500 * 1024 * 1024)) ./tarzst.sh -o large_backup ./data
 
 ## RPM Packaging
 
-An RPM spec file ([tarzst.spec](tarzst.spec)) is included for Red Hat / Fedora-based distributions.
+An RPM spec file ([tarzst.spec](packages/tarzst.spec)) is included for Red Hat / Fedora-based distributions.
 
 ```bash
 # Install build tools
@@ -811,7 +811,7 @@ The RPM installs `/usr/bin/tarzst` and a convenience symlink `/usr/bin/zstar`.
 
 ## Nix / NixOS Packaging
 
-A [Nix flake](../flake.nix) is provided for NixOS and any system with the Nix package manager.
+A [Nix flake](packages/flake.nix) is provided for NixOS and any system with the Nix package manager.
 
 ### Try without installing
 
@@ -872,13 +872,13 @@ The Nix package installs `tarzst` and a convenience symlink `zstar`, with core r
 
 ## Homebrew (macOS)
 
-A [Homebrew formula](Formula/tarzst.rb) is provided for macOS users.
+A [Homebrew formula](packages/Formula/tarzst.rb) is provided for macOS users.
 
 ### Install from a local tap
 
 ```bash
 # From a local clone of this repository
-brew install --formula Formula/tarzst.rb
+brew install --formula packages/Formula/tarzst.rb
 ```
 
 ### Install from a tap
@@ -896,7 +896,7 @@ The formula installs `tarzst` and a convenience symlink `zstar`. Dependencies (`
 
 ## Debian / Ubuntu Packaging
 
-Debian packaging files are provided in [tarzst-project/debian/](tarzst-project/debian/) for building `.deb` packages on Debian and Ubuntu systems.
+Debian packaging files are provided in [packages/debian/](packages/debian/) for building `.deb` packages on Debian and Ubuntu systems.
 
 ### Build the .deb package
 
