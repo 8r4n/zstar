@@ -67,6 +67,35 @@ Security Options:
   -I, --nixos-iso          Build a bootable NixOS live ISO embedding the archive files.
                            Requires 'nix' with flakes support and 'git'. The ISO includes all tools
                            needed for decompression, including GPG and cryptsetup.
+
+Network Streaming:
+  -n, --net-stream <host:port>  Stream compressed (and optionally encrypted) data to a network
+                                destination using netcat (nc). No archive file, checksum, or
+                                decompression script is written to disk.
+                                Requires 'nc' (netcat) to be installed.
+
+Encrypted Real-Time Data Exchange:
+  The generated decompress script supports a 'listen <port>' subcommand to receive
+  streamed data over the network.
+
+  For symmetric encryption (-p):
+    No GPG keys are needed. Both sender and receiver use the same password.
+
+  For asymmetric encryption (-s/-r):
+    The sender needs their signing private key and the recipient's public key.
+    The receiver needs the sender's public key and their own private key.
+
+  Example workflow (symmetric):
+    1. Create archive:   $(basename "$0") -p ./mydata
+    2. Share script:     Give mydata_decompress.sh to the receiver
+    3. Receiver listens: ./mydata_decompress.sh listen 9999
+    4. Sender streams:   $(basename "$0") -p -n receiver_host:9999 ./mydata
+
+  Example workflow (asymmetric):
+    1. Create archive:   $(basename "$0") -s SenderKeyID -r RecipientKeyID ./mydata
+    2. Share script:     Give mydata_decompress.sh to the receiver
+    3. Receiver listens: ./mydata_decompress.sh listen 9999
+    4. Sender streams:   $(basename "$0") -s SenderKeyID -r RecipientKeyID -n receiver_host:9999 ./mydata
 EOF
 }
 
@@ -270,11 +299,12 @@ check_dependencies() {
     declare -A pkg_map
     pkg_map=(
         [tar]="tar" [zstd]="zstd" [sha512sum]="coreutils"
-        [gpg]="gnupg" [numfmt]="coreutils"
+        [gpg]="gnupg" [numfmt]="coreutils" [nc]="netcat"
     )
 
     local required_tools=("tar" "zstd" "sha512sum" "numfmt")
     [ "$check_gpg" -eq 1 ] && required_tools+=("gpg")
+    [ -n "$NET_STREAM" ] && required_tools+=("nc")
 
     local missing_tools=()
     local missing_packages=()
@@ -308,6 +338,9 @@ main() {
   local BURN_AFTER_READING=0
   local USE_ENCRYPTED_TMPFS=0
   local NIXOS_ISO=0
+  local NET_STREAM=""
+  local NET_STREAM_HOST=""
+  local NET_STREAM_PORT=""
   local -a TAR_EXCLUDE_ARGS=()
   local -a INPUT_FILES=()
 
@@ -327,11 +360,27 @@ main() {
       -b|--burn-after-reading) BURN_AFTER_READING=1; shift ;;
       -E|--encrypted-tmpfs) USE_ENCRYPTED_TMPFS=1; shift ;;
       -I|--nixos-iso) NIXOS_ISO=1; shift ;;
+      -n|--net-stream)
+        if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a host:port argument." >&2; exit 2; fi
+        NET_STREAM="$2"
+        if [[ "$NET_STREAM" =~ [[:space:]] ]]; then echo "Error: --net-stream argument must not contain whitespace." >&2; exit 2; fi
+        if [[ "$NET_STREAM" != *:* || "$NET_STREAM" == *:*:* ]]; then echo "Error: --net-stream argument must be in host:port format (e.g., localhost:9000)." >&2; exit 2; fi
+        NET_STREAM_HOST="${NET_STREAM%%:*}"
+        NET_STREAM_PORT="${NET_STREAM##*:}"
+        if [[ -z "$NET_STREAM_HOST" || -z "$NET_STREAM_PORT" ]]; then echo "Error: --net-stream argument must be in host:port format (e.g., localhost:9000)." >&2; exit 2; fi
+        if ! [[ "$NET_STREAM_PORT" =~ ^[0-9]+$ ]]; then echo "Error: Port in --net-stream must be a number." >&2; exit 2; fi
+        if (( NET_STREAM_PORT < 1 || NET_STREAM_PORT > 65535 )); then echo "Error: Port in --net-stream must be in the range 1-65535." >&2; exit 2; fi
+        if ! [[ "$NET_STREAM_HOST" =~ ^[a-zA-Z0-9._-]+$ ]]; then echo "Error: Invalid hostname in --net-stream." >&2; exit 2; fi
+        shift 2 ;;
       -s|--sign)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a key ID." >&2; exit 2; fi
+        # Validate key ID charset to prevent shell injection (key IDs are passed to gpg_cmd which is eval'd)
+        if ! [[ "$2" =~ ^[a-zA-Z0-9@._+:/-]+$ ]]; then echo "Error: Invalid characters in signing key ID." >&2; exit 2; fi
         SIGNING_KEY_ID="$2"; shift 2 ;;
       -r|--recipient)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a key ID." >&2; exit 2; fi
+        # Validate key ID charset to prevent shell injection (key IDs are passed to gpg_cmd which is eval'd)
+        if ! [[ "$2" =~ ^[a-zA-Z0-9@._+:/-]+$ ]]; then echo "Error: Invalid characters in recipient key ID." >&2; exit 2; fi
         RECIPIENT_KEY_ID="$2"; shift 2 ;;
       -h|--help) show_help; exit 0 ;;
       -*) echo "Error: Unknown option: $1" >&2; show_help; exit 2 ;;
@@ -340,6 +389,7 @@ main() {
   done
 
   # --- Step 2: Validate Inputs and Dependencies ---
+
   if [ ${#INPUT_FILES[@]} -eq 0 ]; then echo "Error: No input files or directories specified." >&2; show_help; exit 2; fi
   if [ -n "$RECIPIENT_KEY_ID" ] && [ -z "$SIGNING_KEY_ID" ]; then echo "Error: Encrypting for a recipient (-r) requires you to also sign (-s)." >&2; exit 2; fi
   if [ "$ENCRYPT_FLAG" -eq 1 ] && [ -n "$SIGNING_KEY_ID" ]; then echo "Error: Password encryption (-p) cannot be used with key-based signing/encryption (-s, -r)." >&2; exit 2; fi
@@ -458,6 +508,26 @@ main() {
       pipeline_str+=" | ${gpg_cmd[*]}"
   fi
   
+  if [ -n "$NET_STREAM" ]; then
+    # --- Network Streaming Mode ---
+    echo "--> Streaming to ${NET_STREAM_HOST}:${NET_STREAM_PORT} via netcat..."
+    # Detect netcat close-on-EOF flag for portability
+    local -a nc_close_flags=()
+    if nc -h 2>&1 | grep -q -- '-N'; then
+        nc_close_flags+=("-N")
+    elif nc -h 2>&1 | grep -q -- '-q'; then
+        nc_close_flags+=("-q" "0")
+    fi
+    # Use array-based command to avoid shell injection from host/port values
+    eval "$pipeline_str" | nc "${nc_close_flags[@]}" "$NET_STREAM_HOST" "$NET_STREAM_PORT"
+    
+    # Change back to original directory
+    cd "$original_dir" || { echo "Error: Could not change back to directory $original_dir" >&2; exit 1; }
+    echo ""
+    echo "--- Stream Complete ---"
+    echo "  Data streamed to ${NET_STREAM_HOST}:${NET_STREAM_PORT}"
+    echo ""
+  else
   # Thanks to 'set -o pipefail', this entire pipeline will fail if any part fails.
   eval "$pipeline_str" | (cd "$original_dir" && tee "${full_archive_name}" > /dev/null && sha512sum "${full_archive_name}" > "${checksum_file}")
   
@@ -485,6 +555,7 @@ main() {
 # Usage:
 #   ./\$(basename "\$0")            (Decompress and extract)
 #   ./\$(basename "\$0") list      (List contents without extracting)
+#   ./\$(basename "\$0") listen <port>  (Listen for incoming streamed data on <port>)
 
 # --- Strict Mode & Cleanup ---
 set -euo pipefail
@@ -555,6 +626,91 @@ setup_encrypted_tmpfs() {
 
 # --- Main Logic ---
 run_decompress() {
+  # --- Listen Mode: Receive streamed data over the network ---
+  if [ "\${1:-}" = "listen" ]; then
+    local listen_port="\${2:-}"
+    if [ -z "\$listen_port" ]; then
+      echo "Error: 'listen' requires a port argument." >&2
+      echo "Usage: ./\$(basename "\$0") listen <port>" >&2
+      exit 2
+    fi
+    if ! [[ "\$listen_port" =~ ^[0-9]+\$ ]]; then
+      echo "Error: Port must be a number." >&2; exit 2
+    fi
+    if (( listen_port < 1 || listen_port > 65535 )); then
+      echo "Error: Port must be in the range 1-65535." >&2; exit 2
+    fi
+
+    echo "--- Encrypted Real-Time Data Exchange Listener ---"
+
+    # Check required tools for listen mode
+    local listen_tools=("nc" "zstd" "tar")
+    [ "\$IS_GPG_USED" -eq 1 ] && listen_tools+=("gpg")
+    for tool in "\${listen_tools[@]}"; do
+      if ! command -v "\$tool" >/dev/null; then
+        echo "Error: '\$tool' is required for listen mode." >&2; exit 3
+      fi
+    done
+
+    # Detect netcat listen syntax for portability
+    # Some variants use 'nc -l <port>', others require 'nc -l -p <port>'
+    local -a nc_listen_cmd=("nc")
+    if nc -h 2>&1 | grep -q -- '-p'; then
+      nc_listen_cmd+=("-l" "-p" "\$listen_port")
+    else
+      nc_listen_cmd+=("-l" "\$listen_port")
+    fi
+
+    echo "--> Listening on port \${listen_port} for incoming data..."
+    echo "    Press Ctrl+C to stop listening."
+    echo ""
+
+    if [ "\$IS_GPG_USED" -eq 1 ]; then
+      # Read passphrase for GPG decryption (symmetric or asymmetric private key)
+      local passphrase_file=\$(mktemp); TEMP_FILES+=("\$passphrase_file")
+      local gpg_stderr_file=\$(mktemp); TEMP_FILES+=("\$gpg_stderr_file")
+      if [ -t 0 ]; then
+        read -r -s -p "Enter GPG passphrase for decryption: " GPG_PASSPHRASE; echo >&2
+      else
+        read -r GPG_PASSPHRASE
+      fi
+      echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
+
+      echo "--> Waiting for incoming encrypted data..."
+      echo "    Supports both symmetric (password) and asymmetric (public key) encryption."
+      # Temporarily disable errexit so we can capture the pipeline status
+      # and always display signature verification results
+      set +e
+      "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
+      local listen_status=\$?
+      set -e
+    else
+      echo "--> Waiting for incoming data..."
+      set +e
+      "\${nc_listen_cmd[@]}" | zstd -d | tar -xvf -
+      local listen_status=\$?
+      set -e
+    fi
+
+    echo ""
+    if [ "\$IS_GPG_USED" -eq 1 ]; then
+      if grep -q "Good signature from" "\$gpg_stderr_file" 2>/dev/null; then
+        echo "    OK: GPG signature verified."
+        grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
+      elif grep -qi "bad signature" "\$gpg_stderr_file" 2>/dev/null; then
+        echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
+      fi
+    fi
+
+    if [ "\$listen_status" -eq 0 ]; then
+      echo "--- Data Exchange Complete ---"
+      echo "  Files received and extracted to current directory."
+    else
+      echo "--- Data Exchange Failed ---" >&2
+    fi
+    return \$listen_status
+  fi
+
   echo "--- Decompression & Verification Script ---"
   echo "--> Checking for required tools..."
   local required_tools=("tar" "zstd" "sha512sum")
@@ -667,7 +823,7 @@ run_decompress() {
           if grep -q "Good signature from" "\$gpg_stderr_file"; then
               echo "    OK: GPG signature verified."
               grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
-          elif grep -q "bad signature" "\$gpg_stderr_file"; then
+          elif grep -qi "bad signature" "\$gpg_stderr_file"; then
               echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
           fi
       fi
@@ -731,6 +887,7 @@ EOF
   fi
   echo ""
   echo "To decompress, give the user the .sh script, the .sha512 file, and the archive file(s)."
+  fi # end of file-based (non-streaming) mode
 }
 
 # --- Execute the main function with all script arguments ---
