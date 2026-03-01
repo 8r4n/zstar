@@ -508,7 +508,8 @@ main() {
     rm "$full_archive_name"
   fi
 
-  # --- Step 7: Generate the Smart Decompression Script ---  echo "--- Generating smart decompression script: ${script_name} ---"
+  # --- Step 7: Generate the Smart Decompression Script ---
+  echo "--- Generating smart decompression script: ${script_name} ---"
   cat > "${script_name}" << EOF
 #!/bin/bash
 # Auto-generated script to decompress and verify ${OUTPUT_BASE}

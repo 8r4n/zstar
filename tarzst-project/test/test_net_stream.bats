@@ -83,7 +83,7 @@ teardown() {
     cd "${OUTPUT_DIR}"
 
     # Start netcat listener
-    nc -l -p 19001 > received.tar.zst &
+    nc -l 19001 > received.tar.zst &
     NC_PID=$!
     sleep 1
 
@@ -106,7 +106,7 @@ teardown() {
     cd "${OUTPUT_DIR}"
 
     # Start netcat listener
-    nc -l -p 19002 > received.tar.zst.gpg &
+    nc -l 19002 > received.tar.zst.gpg &
     NC_PID=$!
     sleep 1
 
@@ -129,7 +129,7 @@ teardown() {
     cd "${OUTPUT_DIR}"
 
     # Start netcat listener
-    nc -l -p 19003 > /dev/null &
+    nc -l 19003 > /dev/null &
     NC_PID=$!
     sleep 1
 
