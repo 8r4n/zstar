@@ -1,0 +1,33 @@
+## <summary>Policy interface for zstar archive access.</summary>
+
+########################################
+## <summary>
+##   Allow the specified domain to read zstar archives.
+## </summary>
+## <param name="domain">
+##   <summary>Domain to grant read access.</summary>
+## </param>
+interface(`zstar_read_archive',`
+    gen_require(`
+        type zstar_archive_t;
+    ')
+    allow $1 zstar_archive_t:file { read open getattr };
+    allow $1 zstar_archive_t:dir  { search read open getattr };
+')
+
+########################################
+## <summary>
+##   Allow the specified domain to create and write zstar archives.
+## </summary>
+## <param name="domain">
+##   <summary>Domain to grant write access.</summary>
+## </param>
+interface(`zstar_manage_archive',`
+    gen_require(`
+        type zstar_archive_t;
+    ')
+    allow $1 zstar_archive_t:file { create read write getattr setattr
+                                     unlink rename open append };
+    allow $1 zstar_archive_t:dir  { search read write add_name
+                                     remove_name getattr open };
+')

@@ -43,6 +43,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 
+# --- SELinux Labeling ---
+# Set SELinux context on a zstar output file (if SELinux is active).
+set_zstar_context() {
+  local file="$1"
+  if command -v chcon &>/dev/null && [ -f /etc/selinux/config ] && \
+     grep -q '^SELINUX=enforcing\|^SELINUX=permissive' /etc/selinux/config; then
+    chcon -t zstar_archive_t "$file" 2>/dev/null || true
+  fi
+}
+
+
 # --- Helper Functions ---
 show_help() {
   cat << EOF
@@ -279,6 +290,8 @@ NIXEOF
     iso_source=$(find "${iso_build_dir}/result/iso" -name "*.iso" -print -quit 2>/dev/null)
     if [ -n "$iso_source" ] && [ -f "$iso_source" ]; then
         cp "$iso_source" "${output_base}.iso"
+        # Label NixOS ISO with SELinux context
+        set_zstar_context "${output_base}.iso"
         echo "  NixOS Live ISO: ${output_base}.iso"
     else
         echo "Error: Could not find built ISO image in build output." >&2
@@ -535,6 +548,9 @@ main() {
   cd "$original_dir" || { echo "Error: Could not change back to directory $original_dir" >&2; exit 1; }
   echo "--- Live checksum of final archive generated successfully. ---"
 
+  # Label archive and checksum with SELinux context
+  set_zstar_context "${full_archive_name}"
+  set_zstar_context "${checksum_file}"
 
   # --- Step 6: Split Archive if it Exceeds the Limit ---
   local file_size; file_size=$(wc -c < "$full_archive_name")
@@ -544,6 +560,10 @@ main() {
     split -b "${SPLIT_LIMIT}" -d --additional-suffix=.part "$full_archive_name" "${full_archive_name}."
     echo "--- Split successful. Removing original large archive. ---"
     rm "$full_archive_name"
+    # Label split parts with SELinux context
+    for part_file in "${full_archive_name}".*.part; do
+      set_zstar_context "$part_file"
+    done
   fi
 
   # --- Step 7: Generate the Smart Decompression Script ---
@@ -867,6 +887,8 @@ EOF
 
   # --- Final Steps ---
   chmod +x "$script_name"
+  # Label decompress script with SELinux context
+  set_zstar_context "$script_name"
 
   # --- Step 8: Build NixOS Live ISO (if requested) ---
   if [ "$NIXOS_ISO" -eq 1 ]; then
