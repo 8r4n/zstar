@@ -32,6 +32,11 @@
   - [GPG Signing + Recipient Encryption](#gpg-signing--recipient-encryption)
   - [Non-Interactive / Scripted Usage](#non-interactive--scripted-usage)
   - [NixOS Live ISO](#nixos-live-iso)
+  - [Network Streaming](#network-streaming)
+- [Encrypted Real-Time Data Exchange](#encrypted-real-time-data-exchange)
+  - [Symmetric (Password) Mode](#symmetric-password-mode)
+  - [Asymmetric (Public Key) Mode](#asymmetric-public-key-mode)
+  - [Key Requirements Summary](#key-requirements-summary)
 - [Output Files](#output-files)
 - [The Decompression Script](#the-decompression-script)
 - [Automatic Archive Splitting](#automatic-archive-splitting)
@@ -59,6 +64,9 @@
 - **Self-contained decompression script** generated alongside every archive, requiring no knowledge of the original tool.
 - **Progress bar** support via `pv` (optional, falls back to `cat`).
 - **NixOS Live ISO** generation to embed archives in a bootable live environment with all tools pre-installed.
+- **Network streaming** via netcat — pipe compressed (and optionally encrypted) data directly to a remote host, bypassing all disk I/O.
+- **Encrypted real-time data exchange** — the generated decompress script includes a `listen <port>` subcommand that receives, decrypts, decompresses, and extracts streamed data in real-time.
+- **Cross-implementation netcat portability** — auto-detects OpenBSD vs traditional netcat and adjusts flags accordingly.
 - **Strict error handling** (`set -euo pipefail`) and automatic cleanup of temporary files on exit/interrupt.
 
 ---
@@ -81,6 +89,7 @@
 | Tool | Package | Purpose            |
 | :--- | :------ | :----------------- |
 | `pv` | pv      | Progress bar display |
+| `nc` | netcat (netcat-openbsd, netcat-traditional, or nmap-ncat) | Network streaming (`-n`) and listen mode |
 
 The script checks for missing dependencies at startup and prints package-manager-specific install commands for `apt`, `dnf`, `yum`, `pacman`, and `brew`.
 
@@ -400,6 +409,7 @@ tarzst.sh [options] <file_or_directory ...>
 | `-b` | `--burn-after-reading` | *(none)* | Embed a self-erase routine in the decompression script that securely shreds archive files after extraction. |
 | `-E` | `--encrypted-tmpfs` | *(none)* | Extract to an ephemeral encrypted RAM disk (requires root and `cryptsetup`). Recommended with `-b`. |
 | `-I` | `--nixos-iso` | *(none)* | Build a bootable NixOS live ISO embedding the archive files. Requires `nix` with flakes support. The ISO includes all tools needed for decompression. |
+| `-n` | `--net-stream` | `<host:port>` | Stream compressed (and optionally encrypted) data directly to a network destination via netcat (`nc`). No archive file, checksum, or decompress script is written to disk. Requires `nc` to be installed. |
 | `-h` | `--help` | *(none)* | Display the help message and exit. |
 
 ### Mutually Exclusive Options
@@ -530,6 +540,133 @@ The ISO boots into a minimal NixOS system with all decompression tools pre-insta
 
 All existing decompression script parameters work inside the live ISO, including `--burn-after-reading` and `--encrypted-tmpfs`.
 
+### Network Streaming
+
+Stream compressed (and optionally encrypted) data directly to a remote host over the network, bypassing all disk I/O. No archive file, checksum, or decompress script is written to disk on the sender's side.
+
+**Requires:** `nc` (netcat) installed on both sender and receiver.
+
+```bash
+# Stream a plain compressed archive to a remote listener
+./tarzst.sh -n remote_host:9000 ./mydata
+
+# Stream with symmetric GPG encryption
+./tarzst.sh -p -n remote_host:9000 ./mydata
+
+# Stream with asymmetric GPG encryption (signed + recipient-encrypted)
+./tarzst.sh -s sender@email.com -r recipient@email.com -n remote_host:9000 ./mydata
+
+# Combine with other options (compression level, excludes)
+./tarzst.sh -l 15 -e "*.log" -p -n remote_host:9000 ./mydata
+```
+
+On the **receiver's** side, start a netcat listener before the sender streams:
+
+```bash
+# Receive a plain compressed stream
+nc -l 9000 | zstd -d | tar -xvf -
+
+# Or use the decompress script's listen mode (see below)
+./mydata_decompress.sh listen 9000
+```
+
+**Validation:** The `host:port` argument is strictly validated:
+
+- Exactly one `:` separator (no multiple colons like `a:b:c`).
+- Hostname restricted to safe characters (`[a-zA-Z0-9._-]`).
+- Port must be numeric, in the range 1–65535.
+- No whitespace allowed.
+
+**Netcat portability:** The script auto-detects OpenBSD netcat (`-N` flag) vs traditional netcat (`-q 0` flag) for proper close-on-EOF behavior.
+
+---
+
+## Encrypted Real-Time Data Exchange
+
+The generated decompress script includes a `listen <port>` subcommand that turns the receiver into a netcat listener. When the sender streams data using `--net-stream`, the receiver's decompress script automatically receives, decrypts (if applicable), decompresses, and extracts the data in real-time.
+
+This enables a secure two-party data exchange workflow where:
+
+1. The **sender** creates an archive (generating a decompress script).
+2. The **sender** shares the decompress script with the receiver (via any channel).
+3. The **receiver** runs the decompress script in listen mode.
+4. The **sender** streams the data to the receiver's address.
+
+### Symmetric (Password) Mode
+
+Both parties use the same password — no GPG keys are required.
+
+```bash
+# === Step 1: Sender creates a password-encrypted archive ===
+./tarzst.sh -p ./mydata
+# Enter encryption password when prompted
+# Produces: mydata.tar.zst.gpg, mydata.tar.zst.gpg.sha512, mydata_decompress.sh
+
+# === Step 2: Share the decompress script with the receiver ===
+# (email, USB drive, scp, etc.)
+scp mydata_decompress.sh receiver_host:~/
+
+# === Step 3: Receiver starts listening ===
+# On the receiver's machine:
+./mydata_decompress.sh listen 9999
+# Prompts for the decryption password, then waits for incoming data
+
+# === Step 4: Sender streams the encrypted data ===
+# On the sender's machine:
+./tarzst.sh -p -n receiver_host:9999 ./mydata
+# Enter the same password when prompted
+# Data is compressed, encrypted, and streamed directly to the receiver
+```
+
+### Asymmetric (Public Key) Mode
+
+Uses GPG public/private key pairs for stronger security. The sender signs the data with their private key and encrypts it for the recipient's public key.
+
+**Key requirements:**
+
+- **Sender** needs: their own signing private key + the recipient's public key imported.
+- **Receiver** needs: the sender's public key imported + their own private key.
+
+```bash
+# === Step 1: Sender creates an asymmetric-encrypted archive ===
+./tarzst.sh -s sender@email.com -r recipient@email.com ./mydata
+# Enter signing key passphrase when prompted
+# Produces: mydata.tar.zst.gpg, mydata.tar.zst.gpg.sha512, mydata_decompress.sh
+
+# === Step 2: Share the decompress script with the receiver ===
+scp mydata_decompress.sh receiver_host:~/
+
+# === Step 3: Receiver starts listening ===
+# On the receiver's machine:
+./mydata_decompress.sh listen 9999
+# Prompts for the private key passphrase, then waits for incoming data
+
+# === Step 4: Sender streams with asymmetric encryption ===
+# On the sender's machine:
+./tarzst.sh -s sender@email.com -r recipient@email.com -n receiver_host:9999 ./mydata
+# Enter signing key passphrase when prompted
+```
+
+After receiving the data, the decompress script displays GPG signature verification results:
+
+```
+    OK: GPG signature verified.
+    gpg: Good signature from "sender@email.com" [full]
+```
+
+If the signature doesn't match, a warning is displayed:
+
+```
+    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with.
+```
+
+### Key Requirements Summary
+
+| Mode | Sender needs | Receiver needs |
+| :--- | :----------- | :------------- |
+| Symmetric (`-p`) | Password | Same password |
+| Asymmetric (`-s` + `-r`) | Own signing private key + recipient's public key | Sender's public key + own private key |
+
 ---
 
 ## Output Files
@@ -576,6 +713,25 @@ For encrypted archives, pipe the password/passphrase via stdin:
 ```bash
 echo 'mypassword' | ./my_project_decompress.sh
 ```
+
+### Listen for incoming streamed data
+
+The decompress script includes a `listen <port>` subcommand that turns the receiver's machine into a netcat listener. This enables the [Encrypted Real-Time Data Exchange](#encrypted-real-time-data-exchange) workflow.
+
+```bash
+# Listen for incoming data on port 9999
+./my_project_decompress.sh listen 9999
+```
+
+The `listen` subcommand:
+
+1. **Validates the port** — must be numeric, in the range 1–65535.
+2. **Checks dependencies** — verifies `nc`, `zstd`, and `tar` are installed (plus `gpg` if the archive was created with encryption).
+3. **Prompts for passphrase** — if the archive was encrypted (`IS_GPG_USED=1`), prompts for the GPG passphrase.
+4. **Starts the listener** — pipes incoming data through `gpg -d` (if encrypted) → `zstd -d` → `tar -xvf -`.
+5. **Displays verification** — for asymmetric encryption, shows GPG signature verification results after extraction completes.
+
+**Netcat portability:** The listen mode auto-detects whether the installed netcat requires `-l -p <port>` (traditional) or `-l <port>` (OpenBSD) syntax.
 
 ---
 
@@ -753,6 +909,7 @@ test/
 ├── test_core.bats            # Core archiving functionality (5 tests)
 ├── test_advanced.bats        # Archive splitting (1 test)
 ├── test_gpg_utils.bats       # GPG utility functions (7 tests)
+├── test_net_stream.bats      # Network streaming & listen mode (20 tests)
 ├── test_nixos_iso.bats       # NixOS live ISO feature (6 tests)
 └── test_security.bats        # End-to-end security features (6 tests)
 ```
@@ -826,6 +983,33 @@ Tests the `-I`/`--nixos-iso` flag behavior. Since `nix` is typically not availab
 | 4 | `nixos-iso: -I should work alongside -b flag` | The `-I` flag works with `--burn-after-reading`, and `SELF_ERASE=1` is correctly embedded. |
 | 5 | `nixos-iso: -I should work alongside -b and -E flags` | The `-I` flag works with both `-b` and `-E`, and both flags are correctly embedded in the decompress script. |
 | 6 | `nixos-iso: --help should include --nixos-iso` | The help text includes documentation for the `--nixos-iso` flag. |
+
+#### 7. Network Streaming & Listen Mode — `test_net_stream.bats` (20 tests)
+
+Tests the `-n`/`--net-stream` flag and the decompress script's `listen` subcommand. All functional tests dynamically allocate ephemeral ports to avoid port conflicts. Tests skip gracefully when `nc`, `gpg`, or `python3` is unavailable.
+
+| # | Test | Verifies |
+|---|------|----------|
+| 1 | `net-stream: missing argument for -n should fail with exit code 2` | The `-n` flag requires a `host:port` argument. |
+| 2 | `net-stream: missing argument for --net-stream should fail with exit code 2` | The `--net-stream` long form also requires an argument. |
+| 3 | `net-stream: invalid host:port format (no colon) should fail with exit code 2` | Arguments without a `:` separator are rejected. |
+| 4 | `net-stream: invalid port (non-numeric) should fail with exit code 2` | Non-numeric port values (e.g., `localhost:abc`) are rejected. |
+| 5 | `net-stream: port out of range (0) should fail with exit code 2` | Port `0` is rejected as out of valid range (1–65535). |
+| 6 | `net-stream: port out of range (99999) should fail with exit code 2` | Port `99999` is rejected as out of valid range. |
+| 7 | `net-stream: multiple colons should fail with exit code 2` | Arguments with multiple colons (e.g., `a:b:c`) are rejected. |
+| 8 | `net-stream: whitespace in argument should fail with exit code 2` | Arguments containing whitespace are rejected. |
+| 9 | `net-stream: --help should include --net-stream` | The help text documents the `--net-stream` option. |
+| 10 | `net-stream: --help should mention netcat` | The help text mentions `netcat` / `nc` as a requirement. |
+| 11 | `net-stream: --help should include listen subcommand documentation` | The help text documents the decompress script's `listen` subcommand. |
+| 12 | `net-stream: should stream compressed data to a network port` | Data streamed with `-n` is received by a netcat listener and is a valid zstd-compressed tar archive. |
+| 13 | `net-stream: should stream GPG-encrypted data to a network port` | Data streamed with `-p -n` is received as a valid GPG-encrypted zstd archive. |
+| 14 | `net-stream: should not create archive file, checksum, or decompress script on disk` | When `-n` is used, no `.tar.zst`, `.sha512`, or `_decompress.sh` files are created. |
+| 15 | `listen: decompress script listen subcommand with missing port should fail` | Running `listen` without a port argument produces an error with exit code 2. |
+| 16 | `listen: decompress script listen subcommand with invalid port should fail` | Running `listen abc` rejects non-numeric ports. |
+| 17 | `listen: decompress script listen subcommand with out-of-range port should fail` | Running `listen 99999` rejects out-of-range ports. |
+| 18 | `listen: decompress script should receive and extract streamed data` | End-to-end symmetric test: the decompress script's `listen` mode receives, decrypts, decompresses, and extracts streamed data. |
+| 19 | `net-stream: should stream asymmetric GPG-encrypted data to a network port` | Data streamed with `-s -r -n` is received as a valid asymmetric-GPG-encrypted archive. |
+| 20 | `listen: decompress script should receive asymmetric GPG-encrypted streamed data` | End-to-end asymmetric test: the decompress script's `listen` mode receives, decrypts, and extracts asymmetric-encrypted data with signature verification. |
 
 ### GPG Test Isolation
 
