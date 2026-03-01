@@ -396,8 +396,22 @@ main() {
     echo "    Press Ctrl+C to stop listening."
     echo ""
 
+    # Read passphrase for GPG decryption (private key or symmetric)
+    local passphrase_file
+    passphrase_file="$(mktemp)"; TEMP_FILES+=("$passphrase_file")
+    if [ -t 0 ]; then
+        read -r -s -p "Enter GPG passphrase for decryption: " GPG_PASSPHRASE; echo >&2
+    else
+        read -r GPG_PASSPHRASE
+    fi
+    echo "$GPG_PASSPHRASE" > "$passphrase_file"
+
+    echo "--> Waiting for incoming data..."
+
     # Listen via netcat, pipe through GPG decrypt, then decompress and extract
-    nc -l "$LISTEN_PORT" | gpg --batch --pinentry-mode loopback --trust-model always -d 2>/dev/null | zstd -d | tar -xvf -
+    # GPG will auto-detect whether data is encrypted with public key or symmetric.
+    # If keys are properly imported, signature verification happens automatically.
+    nc -l "$LISTEN_PORT" | gpg --batch --pinentry-mode loopback --passphrase-file "$passphrase_file" -d 2>/dev/null | zstd -d | tar -xvf -
     local listen_status=$?
 
     echo ""
@@ -532,14 +546,14 @@ main() {
     # --- Network Streaming Mode ---
     echo "--> Streaming to ${NET_STREAM_HOST}:${NET_STREAM_PORT} via netcat..."
     # Detect netcat close-on-EOF flag for portability
-    local nc_close_flag=""
-    if nc -h 2>&1 | grep -q '\-N'; then
-        nc_close_flag="-N"
-    elif nc -h 2>&1 | grep -q '\-q'; then
-        nc_close_flag="-q 0"
+    local -a nc_close_flags=()
+    if nc -h 2>&1 | grep -q -- '-N'; then
+        nc_close_flags+=("-N")
+    elif nc -h 2>&1 | grep -q -- '-q'; then
+        nc_close_flags+=("-q" "0")
     fi
     # Use array-based command to avoid shell injection from host/port values
-    eval "$pipeline_str" | nc $nc_close_flag "$NET_STREAM_HOST" "$NET_STREAM_PORT"
+    eval "$pipeline_str" | nc "${nc_close_flags[@]}" "$NET_STREAM_HOST" "$NET_STREAM_PORT"
     
     # Change back to original directory
     cd "$original_dir" || { echo "Error: Could not change back to directory $original_dir" >&2; exit 1; }

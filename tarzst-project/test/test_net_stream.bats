@@ -220,25 +220,30 @@ teardown() {
     [ "$status" -eq 2 ]
 }
 
-@test "listen: should receive and extract streamed data" {
+@test "listen: should receive and extract streamed data using -L flag" {
+    # Skip if GPG is not available (listen mode pipes through gpg)
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "gpg is not available, skipping listen mode test"
+    fi
+
     cd "${OUTPUT_DIR}"
     mkdir -p listen_output && cd listen_output
 
     # Find a free ephemeral port
     PORT=$(find_free_port)
 
-    # Start tarzst listener in background (plain zstd, no GPG for simplicity)
-    # We send unencrypted data so no GPG needed on listen side
-    nc -l "$PORT" | zstd -d | tar -xvf - &
+    # Start tarzst listener using the -L flag in background
+    # Pipe the passphrase for GPG decryption
+    echo 'testpass' | ${TARZST_CMD} -L "$PORT" &
     NC_PID=$!
     sleep 1
 
-    # Stream data to the listener
-    run bash -c "${TARZST_CMD} -n localhost:${PORT} ${SOURCE_DIR}"
+    # Stream GPG-encrypted data to the listener using password encryption
+    run bash -c "echo 'testpass' | ${TARZST_CMD} -p -n localhost:${PORT} ${SOURCE_DIR}"
     assert_success
 
     wait "$NC_PID" 2>/dev/null || true
 
-    # Verify files were received
+    # Verify files were received and extracted
     [ -f "file1.txt" ] || [ -f "./file1.txt" ]
 }
