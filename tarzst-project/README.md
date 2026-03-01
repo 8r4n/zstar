@@ -89,7 +89,7 @@
 | Tool | Package | Purpose            |
 | :--- | :------ | :----------------- |
 | `pv` | pv      | Progress bar display |
-| `nc` | netcat (netcat-openbsd, netcat-traditional, or nmap-ncat) | Network streaming (`-n`) and listen mode |
+| `nc` | netcat, netcat-openbsd, or nmap-ncat | Network streaming (`-n`) and listen mode |
 
 The script checks for missing dependencies at startup and prints package-manager-specific install commands for `apt`, `dnf`, `yum`, `pacman`, and `brew`.
 
