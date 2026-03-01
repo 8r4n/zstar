@@ -67,6 +67,12 @@ Security Options:
   -I, --nixos-iso          Build a bootable NixOS live ISO embedding the archive files.
                            Requires 'nix' with flakes support and 'git'. The ISO includes all tools
                            needed for decompression, including GPG and cryptsetup.
+
+Network Streaming:
+  -n, --net-stream <host:port>  Stream compressed (and optionally encrypted) data to a network
+                                destination using netcat (nc). No archive file, checksum, or
+                                decompression script is written to disk.
+                                Requires 'nc' (netcat) to be installed.
 EOF
 }
 
@@ -270,11 +276,12 @@ check_dependencies() {
     declare -A pkg_map
     pkg_map=(
         [tar]="tar" [zstd]="zstd" [sha512sum]="coreutils"
-        [gpg]="gnupg" [numfmt]="coreutils"
+        [gpg]="gnupg" [numfmt]="coreutils" [nc]="ncat"
     )
 
     local required_tools=("tar" "zstd" "sha512sum" "numfmt")
     [ "$check_gpg" -eq 1 ] && required_tools+=("gpg")
+    [ -n "$NET_STREAM" ] && required_tools+=("nc")
 
     local missing_tools=()
     local missing_packages=()
@@ -308,6 +315,9 @@ main() {
   local BURN_AFTER_READING=0
   local USE_ENCRYPTED_TMPFS=0
   local NIXOS_ISO=0
+  local NET_STREAM=""
+  local NET_STREAM_HOST=""
+  local NET_STREAM_PORT=""
   local -a TAR_EXCLUDE_ARGS=()
   local -a INPUT_FILES=()
 
@@ -327,6 +337,15 @@ main() {
       -b|--burn-after-reading) BURN_AFTER_READING=1; shift ;;
       -E|--encrypted-tmpfs) USE_ENCRYPTED_TMPFS=1; shift ;;
       -I|--nixos-iso) NIXOS_ISO=1; shift ;;
+      -n|--net-stream)
+        if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a host:port argument." >&2; exit 2; fi
+        NET_STREAM="$2"
+        if [[ "$NET_STREAM" != *:* ]]; then echo "Error: --net-stream argument must be in host:port format (e.g., localhost:9000)." >&2; exit 2; fi
+        NET_STREAM_HOST="${NET_STREAM%%:*}"
+        NET_STREAM_PORT="${NET_STREAM##*:}"
+        if [[ -z "$NET_STREAM_HOST" || -z "$NET_STREAM_PORT" ]]; then echo "Error: --net-stream argument must be in host:port format (e.g., localhost:9000)." >&2; exit 2; fi
+        if ! [[ "$NET_STREAM_PORT" =~ ^[0-9]+$ ]]; then echo "Error: Port in --net-stream must be a number." >&2; exit 2; fi
+        shift 2 ;;
       -s|--sign)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a key ID." >&2; exit 2; fi
         SIGNING_KEY_ID="$2"; shift 2 ;;
@@ -458,6 +477,19 @@ main() {
       pipeline_str+=" | ${gpg_cmd[*]}"
   fi
   
+  if [ -n "$NET_STREAM" ]; then
+    # --- Network Streaming Mode ---
+    echo "--> Streaming to ${NET_STREAM_HOST}:${NET_STREAM_PORT} via netcat..."
+    pipeline_str+=" | nc -N ${NET_STREAM_HOST} ${NET_STREAM_PORT}"
+    eval "$pipeline_str"
+    
+    # Change back to original directory
+    cd "$original_dir" || { echo "Error: Could not change back to directory $original_dir" >&2; exit 1; }
+    echo ""
+    echo "--- Stream Complete ---"
+    echo "  Data streamed to ${NET_STREAM_HOST}:${NET_STREAM_PORT}"
+    echo ""
+  else
   # Thanks to 'set -o pipefail', this entire pipeline will fail if any part fails.
   eval "$pipeline_str" | (cd "$original_dir" && tee "${full_archive_name}" > /dev/null && sha512sum "${full_archive_name}" > "${checksum_file}")
   
@@ -476,8 +508,7 @@ main() {
     rm "$full_archive_name"
   fi
 
-  # --- Step 7: Generate the Smart Decompression Script ---
-  echo "--- Generating smart decompression script: ${script_name} ---"
+  # --- Step 7: Generate the Smart Decompression Script ---  echo "--- Generating smart decompression script: ${script_name} ---"
   cat > "${script_name}" << EOF
 #!/bin/bash
 # Auto-generated script to decompress and verify ${OUTPUT_BASE}
@@ -731,6 +762,7 @@ EOF
   fi
   echo ""
   echo "To decompress, give the user the .sh script, the .sha512 file, and the archive file(s)."
+  fi # end of file-based (non-streaming) mode
 }
 
 # --- Execute the main function with all script arguments ---
