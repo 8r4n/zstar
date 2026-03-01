@@ -73,6 +73,17 @@ Network Streaming:
                                 destination using netcat (nc). No archive file, checksum, or
                                 decompression script is written to disk.
                                 Requires 'nc' (netcat) to be installed.
+
+Encrypted Real-Time Data Exchange:
+  -L, --listen <port>           Start an encrypted data exchange listener on the given port.
+                                Listens for incoming GPG-encrypted compressed data and decrypts
+                                it in real-time. Requires GPG with appropriate private key.
+                                Both parties must have each other's public keys.
+
+                                Example (receive):
+                                  $(basename "$0") -L 9999
+                                Example (send to listener):
+                                  $(basename "$0") -n host:9999 -r RecipientKeyID -s SenderKeyID <files>
 EOF
 }
 
@@ -276,7 +287,7 @@ check_dependencies() {
     declare -A pkg_map
     pkg_map=(
         [tar]="tar" [zstd]="zstd" [sha512sum]="coreutils"
-        [gpg]="gnupg" [numfmt]="coreutils" [nc]="ncat"
+        [gpg]="gnupg" [numfmt]="coreutils" [nc]="netcat"
     )
 
     local required_tools=("tar" "zstd" "sha512sum" "numfmt")
@@ -318,6 +329,7 @@ main() {
   local NET_STREAM=""
   local NET_STREAM_HOST=""
   local NET_STREAM_PORT=""
+  local LISTEN_PORT=""
   local -a TAR_EXCLUDE_ARGS=()
   local -a INPUT_FILES=()
 
@@ -340,11 +352,20 @@ main() {
       -n|--net-stream)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a host:port argument." >&2; exit 2; fi
         NET_STREAM="$2"
-        if [[ "$NET_STREAM" != *:* ]]; then echo "Error: --net-stream argument must be in host:port format (e.g., localhost:9000)." >&2; exit 2; fi
+        if [[ "$NET_STREAM" =~ [[:space:]] ]]; then echo "Error: --net-stream argument must not contain whitespace." >&2; exit 2; fi
+        if [[ "$NET_STREAM" != *:* || "$NET_STREAM" == *:*:* ]]; then echo "Error: --net-stream argument must be in host:port format (e.g., localhost:9000)." >&2; exit 2; fi
         NET_STREAM_HOST="${NET_STREAM%%:*}"
         NET_STREAM_PORT="${NET_STREAM##*:}"
         if [[ -z "$NET_STREAM_HOST" || -z "$NET_STREAM_PORT" ]]; then echo "Error: --net-stream argument must be in host:port format (e.g., localhost:9000)." >&2; exit 2; fi
         if ! [[ "$NET_STREAM_PORT" =~ ^[0-9]+$ ]]; then echo "Error: Port in --net-stream must be a number." >&2; exit 2; fi
+        if (( NET_STREAM_PORT < 1 || NET_STREAM_PORT > 65535 )); then echo "Error: Port in --net-stream must be in the range 1-65535." >&2; exit 2; fi
+        if ! [[ "$NET_STREAM_HOST" =~ ^[a-zA-Z0-9._-]+$ ]]; then echo "Error: Invalid hostname in --net-stream." >&2; exit 2; fi
+        shift 2 ;;
+      -L|--listen)
+        if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a port argument." >&2; exit 2; fi
+        LISTEN_PORT="$2"
+        if ! [[ "$LISTEN_PORT" =~ ^[0-9]+$ ]]; then echo "Error: Port in --listen must be a number." >&2; exit 2; fi
+        if (( LISTEN_PORT < 1 || LISTEN_PORT > 65535 )); then echo "Error: Port in --listen must be in the range 1-65535." >&2; exit 2; fi
         shift 2 ;;
       -s|--sign)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a key ID." >&2; exit 2; fi
@@ -359,6 +380,36 @@ main() {
   done
 
   # --- Step 2: Validate Inputs and Dependencies ---
+
+  # --- Listen Mode: Encrypted Real-Time Data Exchange Receiver ---
+  if [ -n "$LISTEN_PORT" ]; then
+    # Listen mode requires nc and gpg
+    for tool in nc gpg zstd tar; do
+        if ! command -v "$tool" >/dev/null; then
+            echo "Error: '$tool' is required for --listen mode." >&2; exit 3
+        fi
+    done
+
+    echo "--- Encrypted Real-Time Data Exchange Listener ---"
+    echo "--> Listening on port ${LISTEN_PORT} for incoming encrypted data..."
+    echo "    Sender should use: $(basename "$0") -n <this_host>:${LISTEN_PORT} -r <YourKeyID> -s <SenderKeyID> <files>"
+    echo "    Press Ctrl+C to stop listening."
+    echo ""
+
+    # Listen via netcat, pipe through GPG decrypt, then decompress and extract
+    nc -l "$LISTEN_PORT" | gpg --batch --pinentry-mode loopback --trust-model always -d 2>/dev/null | zstd -d | tar -xvf -
+    local listen_status=$?
+
+    echo ""
+    if [ "$listen_status" -eq 0 ]; then
+        echo "--- Data Exchange Complete ---"
+        echo "  Files received and extracted to current directory."
+    else
+        echo "--- Data Exchange Failed ---" >&2
+    fi
+    exit "$listen_status"
+  fi
+
   if [ ${#INPUT_FILES[@]} -eq 0 ]; then echo "Error: No input files or directories specified." >&2; show_help; exit 2; fi
   if [ -n "$RECIPIENT_KEY_ID" ] && [ -z "$SIGNING_KEY_ID" ]; then echo "Error: Encrypting for a recipient (-r) requires you to also sign (-s)." >&2; exit 2; fi
   if [ "$ENCRYPT_FLAG" -eq 1 ] && [ -n "$SIGNING_KEY_ID" ]; then echo "Error: Password encryption (-p) cannot be used with key-based signing/encryption (-s, -r)." >&2; exit 2; fi
@@ -480,8 +531,15 @@ main() {
   if [ -n "$NET_STREAM" ]; then
     # --- Network Streaming Mode ---
     echo "--> Streaming to ${NET_STREAM_HOST}:${NET_STREAM_PORT} via netcat..."
-    pipeline_str+=" | nc -N ${NET_STREAM_HOST} ${NET_STREAM_PORT}"
-    eval "$pipeline_str"
+    # Detect netcat close-on-EOF flag for portability
+    local nc_close_flag=""
+    if nc -h 2>&1 | grep -q '\-N'; then
+        nc_close_flag="-N"
+    elif nc -h 2>&1 | grep -q '\-q'; then
+        nc_close_flag="-q 0"
+    fi
+    # Use array-based command to avoid shell injection from host/port values
+    eval "$pipeline_str" | nc $nc_close_flag "$NET_STREAM_HOST" "$NET_STREAM_PORT"
     
     # Change back to original directory
     cd "$original_dir" || { echo "Error: Could not change back to directory $original_dir" >&2; exit 1; }

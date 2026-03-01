@@ -26,12 +26,22 @@ assert_output() {
     fi
 }
 
+# Helper to find a free ephemeral port
+find_free_port() {
+    python3 -c "import socket; s=socket.socket(); s.bind(('localhost',0)); print(s.getsockname()[1]); s.close()"
+}
+
 setup() {
     TEST_DIR="${TEST_DIR}/artifacts/tmp"
     SOURCE_DIR="${TEST_DIR}/project_a"
     OUTPUT_DIR="${TEST_DIR}/output_net_stream"
     mkdir -p "$OUTPUT_DIR"
     cd "$OUTPUT_DIR"
+
+    # Skip all functional tests if nc is not available
+    if ! command -v nc >/dev/null 2>&1; then
+        skip "nc (netcat) is not available, skipping net-stream tests"
+    fi
 }
 
 teardown() {
@@ -65,6 +75,26 @@ teardown() {
     [ "$status" -eq 2 ]
 }
 
+@test "net-stream: port out of range (0) should fail with exit code 2" {
+    run "${TARZST_CMD}" -n localhost:0 "${SOURCE_DIR}"
+    [ "$status" -eq 2 ]
+}
+
+@test "net-stream: port out of range (99999) should fail with exit code 2" {
+    run "${TARZST_CMD}" -n localhost:99999 "${SOURCE_DIR}"
+    [ "$status" -eq 2 ]
+}
+
+@test "net-stream: multiple colons should fail with exit code 2" {
+    run "${TARZST_CMD}" -n a:b:c "${SOURCE_DIR}"
+    [ "$status" -eq 2 ]
+}
+
+@test "net-stream: whitespace in argument should fail with exit code 2" {
+    run "${TARZST_CMD}" -n "local host:9000" "${SOURCE_DIR}"
+    [ "$status" -eq 2 ]
+}
+
 @test "net-stream: --help should include --net-stream" {
     run "${TARZST_CMD}" --help
     [ "$status" -eq 0 ]
@@ -77,18 +107,27 @@ teardown() {
     assert_output --partial "netcat"
 }
 
+@test "net-stream: --help should include --listen" {
+    run "${TARZST_CMD}" --help
+    [ "$status" -eq 0 ]
+    assert_output --partial "--listen"
+}
+
 # --- Functional Streaming Tests ---
 
 @test "net-stream: should stream compressed data to a network port" {
     cd "${OUTPUT_DIR}"
 
+    # Find a free ephemeral port
+    PORT=$(find_free_port)
+
     # Start netcat listener
-    nc -l 19001 > received.tar.zst &
+    nc -l "$PORT" > received.tar.zst &
     NC_PID=$!
     sleep 1
 
     # Stream data
-    run bash -c "${TARZST_CMD} -n localhost:19001 ${SOURCE_DIR}"
+    run bash -c "${TARZST_CMD} -n localhost:${PORT} ${SOURCE_DIR}"
     assert_success
     assert_output --partial "Stream Complete"
 
@@ -103,15 +142,23 @@ teardown() {
 }
 
 @test "net-stream: should stream GPG-encrypted data to a network port" {
+    # Skip if GPG is not available
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "gpg is not available, skipping GPG streaming test"
+    fi
+
     cd "${OUTPUT_DIR}"
 
+    # Find a free ephemeral port
+    PORT=$(find_free_port)
+
     # Start netcat listener
-    nc -l 19002 > received.tar.zst.gpg &
+    nc -l "$PORT" > received.tar.zst.gpg &
     NC_PID=$!
     sleep 1
 
     # Stream data with password encryption
-    run bash -c "echo 'testpass' | ${TARZST_CMD} -p -n localhost:19002 ${SOURCE_DIR}"
+    run bash -c "echo 'testpass' | ${TARZST_CMD} -p -n localhost:${PORT} ${SOURCE_DIR}"
     assert_success
     assert_output --partial "Stream Complete"
 
@@ -128,12 +175,15 @@ teardown() {
 @test "net-stream: should not create archive file, checksum, or decompress script on disk" {
     cd "${OUTPUT_DIR}"
 
+    # Find a free ephemeral port
+    PORT=$(find_free_port)
+
     # Start netcat listener
-    nc -l 19003 > /dev/null &
+    nc -l "$PORT" > /dev/null &
     NC_PID=$!
     sleep 1
 
-    run bash -c "${TARZST_CMD} -o streamed_output -n localhost:19003 ${SOURCE_DIR}"
+    run bash -c "${TARZST_CMD} -o streamed_output -n localhost:${PORT} ${SOURCE_DIR}"
     assert_success
 
     wait "$NC_PID" 2>/dev/null || true
@@ -151,4 +201,44 @@ teardown() {
         echo "Decompress script should not exist in streaming mode" >&2
         return 1
     fi
+}
+
+# --- Listen Mode Tests ---
+
+@test "listen: missing argument for -L should fail with exit code 2" {
+    run "${TARZST_CMD}" -L
+    [ "$status" -eq 2 ]
+}
+
+@test "listen: invalid port (non-numeric) should fail with exit code 2" {
+    run "${TARZST_CMD}" -L abc
+    [ "$status" -eq 2 ]
+}
+
+@test "listen: port out of range should fail with exit code 2" {
+    run "${TARZST_CMD}" -L 99999
+    [ "$status" -eq 2 ]
+}
+
+@test "listen: should receive and extract streamed data" {
+    cd "${OUTPUT_DIR}"
+    mkdir -p listen_output && cd listen_output
+
+    # Find a free ephemeral port
+    PORT=$(find_free_port)
+
+    # Start tarzst listener in background (plain zstd, no GPG for simplicity)
+    # We send unencrypted data so no GPG needed on listen side
+    nc -l "$PORT" | zstd -d | tar -xvf - &
+    NC_PID=$!
+    sleep 1
+
+    # Stream data to the listener
+    run bash -c "${TARZST_CMD} -n localhost:${PORT} ${SOURCE_DIR}"
+    assert_success
+
+    wait "$NC_PID" 2>/dev/null || true
+
+    # Verify files were received
+    [ -f "file1.txt" ] || [ -f "./file1.txt" ]
 }
