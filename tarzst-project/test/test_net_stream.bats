@@ -45,6 +45,11 @@ setup() {
     if ! command -v nc >/dev/null 2>&1; then
         skip "nc (netcat) is not available, skipping net-stream tests"
     fi
+
+    # Skip if python3 is not available (needed for find_free_port)
+    if ! command -v python3 >/dev/null 2>&1; then
+        skip "python3 is not available (needed for ephemeral port allocation)"
+    fi
 }
 
 teardown() {

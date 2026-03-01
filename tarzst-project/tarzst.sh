@@ -76,13 +76,26 @@ Network Streaming:
 
 Encrypted Real-Time Data Exchange:
   The generated decompress script supports a 'listen <port>' subcommand to receive
-  streamed data over the network. Both parties must have each other's GPG public keys.
+  streamed data over the network.
 
-  Example workflow:
+  For symmetric encryption (-p):
+    No GPG keys are needed. Both sender and receiver use the same password.
+
+  For asymmetric encryption (-s/-r):
+    The sender needs their signing private key and the recipient's public key.
+    The receiver needs the sender's public key and their own private key.
+
+  Example workflow (symmetric):
     1. Create archive:   $(basename "$0") -p ./mydata
     2. Share script:     Give mydata_decompress.sh to the receiver
     3. Receiver listens: ./mydata_decompress.sh listen 9999
     4. Sender streams:   $(basename "$0") -p -n receiver_host:9999 ./mydata
+
+  Example workflow (asymmetric):
+    1. Create archive:   $(basename "$0") -s SenderKeyID -r RecipientKeyID ./mydata
+    2. Share script:     Give mydata_decompress.sh to the receiver
+    3. Receiver listens: ./mydata_decompress.sh listen 9999
+    4. Sender streams:   $(basename "$0") -s SenderKeyID -r RecipientKeyID -n receiver_host:9999 ./mydata
 EOF
 }
 
@@ -361,9 +374,13 @@ main() {
         shift 2 ;;
       -s|--sign)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a key ID." >&2; exit 2; fi
+        # Validate key ID charset to prevent shell injection (key IDs are passed to gpg_cmd which is eval'd)
+        if ! [[ "$2" =~ ^[a-zA-Z0-9@._+:/-]+$ ]]; then echo "Error: Invalid characters in signing key ID." >&2; exit 2; fi
         SIGNING_KEY_ID="$2"; shift 2 ;;
       -r|--recipient)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a key ID." >&2; exit 2; fi
+        # Validate key ID charset to prevent shell injection (key IDs are passed to gpg_cmd which is eval'd)
+        if ! [[ "$2" =~ ^[a-zA-Z0-9@._+:/-]+$ ]]; then echo "Error: Invalid characters in recipient key ID." >&2; exit 2; fi
         RECIPIENT_KEY_ID="$2"; shift 2 ;;
       -h|--help) show_help; exit 0 ;;
       -*) echo "Error: Unknown option: $1" >&2; show_help; exit 2 ;;
@@ -635,6 +652,15 @@ run_decompress() {
       fi
     done
 
+    # Detect netcat listen syntax for portability
+    # Some variants use 'nc -l <port>', others require 'nc -l -p <port>'
+    local -a nc_listen_cmd=("nc")
+    if nc -h 2>&1 | grep -q -- '-p'; then
+      nc_listen_cmd+=("-l" "-p" "\$listen_port")
+    else
+      nc_listen_cmd+=("-l" "\$listen_port")
+    fi
+
     echo "--> Listening on port \${listen_port} for incoming data..."
     echo "    Press Ctrl+C to stop listening."
     echo ""
@@ -652,19 +678,26 @@ run_decompress() {
 
       echo "--> Waiting for incoming encrypted data..."
       echo "    Supports both symmetric (password) and asymmetric (public key) encryption."
-      nc -l "\$listen_port" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
+      # Temporarily disable errexit so we can capture the pipeline status
+      # and always display signature verification results
+      set +e
+      "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
+      local listen_status=\$?
+      set -e
     else
       echo "--> Waiting for incoming data..."
-      nc -l "\$listen_port" | zstd -d | tar -xvf -
+      set +e
+      "\${nc_listen_cmd[@]}" | zstd -d | tar -xvf -
+      local listen_status=\$?
+      set -e
     fi
-    local listen_status=\$?
 
     echo ""
     if [ "\$IS_GPG_USED" -eq 1 ]; then
       if grep -q "Good signature from" "\$gpg_stderr_file" 2>/dev/null; then
         echo "    OK: GPG signature verified."
         grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
-      elif grep -q "bad signature" "\$gpg_stderr_file" 2>/dev/null; then
+      elif grep -qi "bad signature" "\$gpg_stderr_file" 2>/dev/null; then
         echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
       fi
     fi
@@ -790,7 +823,7 @@ run_decompress() {
           if grep -q "Good signature from" "\$gpg_stderr_file"; then
               echo "    OK: GPG signature verified."
               grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
-          elif grep -q "bad signature" "\$gpg_stderr_file"; then
+          elif grep -qi "bad signature" "\$gpg_stderr_file"; then
               echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
           fi
       fi
