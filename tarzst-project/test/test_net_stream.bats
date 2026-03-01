@@ -107,10 +107,10 @@ teardown() {
     assert_output --partial "netcat"
 }
 
-@test "net-stream: --help should include --listen" {
+@test "net-stream: --help should include listen subcommand documentation" {
     run "${TARZST_CMD}" --help
     [ "$status" -eq 0 ]
-    assert_output --partial "--listen"
+    assert_output --partial "listen"
 }
 
 # --- Functional Streaming Tests ---
@@ -203,38 +203,87 @@ teardown() {
     fi
 }
 
-# --- Listen Mode Tests ---
+# --- Listen Mode Tests (via decompress script) ---
 
-@test "listen: missing argument for -L should fail with exit code 2" {
-    run "${TARZST_CMD}" -L
+@test "listen: decompress script listen subcommand with missing port should fail" {
+    # Skip if GPG is not available
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "gpg is not available, skipping listen test"
+    fi
+
+    cd "${OUTPUT_DIR}"
+    mkdir -p listen_validation && cd listen_validation
+
+    # Generate a decompress script by creating a password-encrypted archive
+    run bash -c "echo 'testpass' | ${TARZST_CMD} -p ${SOURCE_DIR}"
+    assert_success
+
+    # Test: listen with no port should fail
+    run ./project_a_decompress.sh listen
     [ "$status" -eq 2 ]
 }
 
-@test "listen: invalid port (non-numeric) should fail with exit code 2" {
-    run "${TARZST_CMD}" -L abc
+@test "listen: decompress script listen subcommand with invalid port should fail" {
+    # Skip if GPG is not available
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "gpg is not available, skipping listen test"
+    fi
+
+    cd "${OUTPUT_DIR}"
+    mkdir -p listen_validation2 && cd listen_validation2
+
+    # Generate a decompress script
+    run bash -c "echo 'testpass' | ${TARZST_CMD} -p ${SOURCE_DIR}"
+    assert_success
+
+    # Test: listen with non-numeric port should fail
+    run ./project_a_decompress.sh listen abc
     [ "$status" -eq 2 ]
 }
 
-@test "listen: port out of range should fail with exit code 2" {
-    run "${TARZST_CMD}" -L 99999
+@test "listen: decompress script listen subcommand with out-of-range port should fail" {
+    # Skip if GPG is not available
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "gpg is not available, skipping listen test"
+    fi
+
+    cd "${OUTPUT_DIR}"
+    mkdir -p listen_validation3 && cd listen_validation3
+
+    # Generate a decompress script
+    run bash -c "echo 'testpass' | ${TARZST_CMD} -p ${SOURCE_DIR}"
+    assert_success
+
+    # Test: listen with out-of-range port should fail
+    run ./project_a_decompress.sh listen 99999
     [ "$status" -eq 2 ]
 }
 
-@test "listen: should receive and extract streamed data using -L flag" {
-    # Skip if GPG is not available (listen mode pipes through gpg)
+@test "listen: decompress script should receive and extract streamed data" {
+    # Skip if GPG is not available (listen mode pipes through gpg when IS_GPG_USED=1)
     if ! command -v gpg >/dev/null 2>&1; then
         skip "gpg is not available, skipping listen mode test"
     fi
 
     cd "${OUTPUT_DIR}"
-    mkdir -p listen_output && cd listen_output
+    mkdir -p listen_e2e && cd listen_e2e
+
+    # First create an archive to generate the decompress script
+    run bash -c "echo 'testpass' | ${TARZST_CMD} -p ${SOURCE_DIR}"
+    assert_success
+
+    # Ensure the decompress script was generated
+    [ -f "project_a_decompress.sh" ]
+
+    # Create a separate directory for the listener to extract into
+    mkdir -p received && cd received
 
     # Find a free ephemeral port
     PORT=$(find_free_port)
 
-    # Start tarzst listener using the -L flag in background
+    # Start listener using the decompress script's listen subcommand
     # Pipe the passphrase for GPG decryption
-    echo 'testpass' | ${TARZST_CMD} -L "$PORT" &
+    echo 'testpass' | ../project_a_decompress.sh listen "$PORT" &
     NC_PID=$!
     sleep 1
 

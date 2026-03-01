@@ -75,15 +75,14 @@ Network Streaming:
                                 Requires 'nc' (netcat) to be installed.
 
 Encrypted Real-Time Data Exchange:
-  -L, --listen <port>           Start an encrypted data exchange listener on the given port.
-                                Listens for incoming GPG-encrypted compressed data and decrypts
-                                it in real-time. Requires GPG with appropriate private key.
-                                Both parties must have each other's public keys.
+  The generated decompress script supports a 'listen <port>' subcommand to receive
+  streamed data over the network. Both parties must have each other's GPG public keys.
 
-                                Example (receive):
-                                  $(basename "$0") -L 9999
-                                Example (send to listener):
-                                  $(basename "$0") -n host:9999 -r RecipientKeyID -s SenderKeyID <files>
+  Example workflow:
+    1. Create archive:   $(basename "$0") -p ./mydata
+    2. Share script:     Give mydata_decompress.sh to the receiver
+    3. Receiver listens: ./mydata_decompress.sh listen 9999
+    4. Sender streams:   $(basename "$0") -p -n receiver_host:9999 ./mydata
 EOF
 }
 
@@ -329,7 +328,6 @@ main() {
   local NET_STREAM=""
   local NET_STREAM_HOST=""
   local NET_STREAM_PORT=""
-  local LISTEN_PORT=""
   local -a TAR_EXCLUDE_ARGS=()
   local -a INPUT_FILES=()
 
@@ -361,12 +359,6 @@ main() {
         if (( NET_STREAM_PORT < 1 || NET_STREAM_PORT > 65535 )); then echo "Error: Port in --net-stream must be in the range 1-65535." >&2; exit 2; fi
         if ! [[ "$NET_STREAM_HOST" =~ ^[a-zA-Z0-9._-]+$ ]]; then echo "Error: Invalid hostname in --net-stream." >&2; exit 2; fi
         shift 2 ;;
-      -L|--listen)
-        if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a port argument." >&2; exit 2; fi
-        LISTEN_PORT="$2"
-        if ! [[ "$LISTEN_PORT" =~ ^[0-9]+$ ]]; then echo "Error: Port in --listen must be a number." >&2; exit 2; fi
-        if (( LISTEN_PORT < 1 || LISTEN_PORT > 65535 )); then echo "Error: Port in --listen must be in the range 1-65535." >&2; exit 2; fi
-        shift 2 ;;
       -s|--sign)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a key ID." >&2; exit 2; fi
         SIGNING_KEY_ID="$2"; shift 2 ;;
@@ -380,49 +372,6 @@ main() {
   done
 
   # --- Step 2: Validate Inputs and Dependencies ---
-
-  # --- Listen Mode: Encrypted Real-Time Data Exchange Receiver ---
-  if [ -n "$LISTEN_PORT" ]; then
-    # Listen mode requires nc and gpg
-    for tool in nc gpg zstd tar; do
-        if ! command -v "$tool" >/dev/null; then
-            echo "Error: '$tool' is required for --listen mode." >&2; exit 3
-        fi
-    done
-
-    echo "--- Encrypted Real-Time Data Exchange Listener ---"
-    echo "--> Listening on port ${LISTEN_PORT} for incoming encrypted data..."
-    echo "    Sender should use: $(basename "$0") -n <this_host>:${LISTEN_PORT} -r <YourKeyID> -s <SenderKeyID> <files>"
-    echo "    Press Ctrl+C to stop listening."
-    echo ""
-
-    # Read passphrase for GPG decryption (private key or symmetric)
-    local passphrase_file
-    passphrase_file="$(mktemp)"; TEMP_FILES+=("$passphrase_file")
-    if [ -t 0 ]; then
-        read -r -s -p "Enter GPG passphrase for decryption: " GPG_PASSPHRASE; echo >&2
-    else
-        read -r GPG_PASSPHRASE
-    fi
-    echo "$GPG_PASSPHRASE" > "$passphrase_file"
-
-    echo "--> Waiting for incoming data..."
-
-    # Listen via netcat, pipe through GPG decrypt, then decompress and extract
-    # GPG will auto-detect whether data is encrypted with public key or symmetric.
-    # If keys are properly imported, signature verification happens automatically.
-    nc -l "$LISTEN_PORT" | gpg --batch --pinentry-mode loopback --passphrase-file "$passphrase_file" -d 2>/dev/null | zstd -d | tar -xvf -
-    local listen_status=$?
-
-    echo ""
-    if [ "$listen_status" -eq 0 ]; then
-        echo "--- Data Exchange Complete ---"
-        echo "  Files received and extracted to current directory."
-    else
-        echo "--- Data Exchange Failed ---" >&2
-    fi
-    exit "$listen_status"
-  fi
 
   if [ ${#INPUT_FILES[@]} -eq 0 ]; then echo "Error: No input files or directories specified." >&2; show_help; exit 2; fi
   if [ -n "$RECIPIENT_KEY_ID" ] && [ -z "$SIGNING_KEY_ID" ]; then echo "Error: Encrypting for a recipient (-r) requires you to also sign (-s)." >&2; exit 2; fi
@@ -589,6 +538,7 @@ main() {
 # Usage:
 #   ./\$(basename "\$0")            (Decompress and extract)
 #   ./\$(basename "\$0") list      (List contents without extracting)
+#   ./\$(basename "\$0") listen <port>  (Listen for incoming streamed data on <port>)
 
 # --- Strict Mode & Cleanup ---
 set -euo pipefail
@@ -659,6 +609,64 @@ setup_encrypted_tmpfs() {
 
 # --- Main Logic ---
 run_decompress() {
+  # --- Listen Mode: Receive streamed data over the network ---
+  if [ "\${1:-}" = "listen" ]; then
+    local listen_port="\${2:-}"
+    if [ -z "\$listen_port" ]; then
+      echo "Error: 'listen' requires a port argument." >&2
+      echo "Usage: ./\$(basename "\$0") listen <port>" >&2
+      exit 2
+    fi
+    if ! [[ "\$listen_port" =~ ^[0-9]+\$ ]]; then
+      echo "Error: Port must be a number." >&2; exit 2
+    fi
+    if (( listen_port < 1 || listen_port > 65535 )); then
+      echo "Error: Port must be in the range 1-65535." >&2; exit 2
+    fi
+
+    echo "--- Encrypted Real-Time Data Exchange Listener ---"
+
+    # Check required tools for listen mode
+    local listen_tools=("nc" "zstd" "tar")
+    [ "\$IS_GPG_USED" -eq 1 ] && listen_tools+=("gpg")
+    for tool in "\${listen_tools[@]}"; do
+      if ! command -v "\$tool" >/dev/null; then
+        echo "Error: '\$tool' is required for listen mode." >&2; exit 3
+      fi
+    done
+
+    echo "--> Listening on port \${listen_port} for incoming data..."
+    echo "    Press Ctrl+C to stop listening."
+    echo ""
+
+    if [ "\$IS_GPG_USED" -eq 1 ]; then
+      # Read passphrase for GPG decryption
+      local passphrase_file=\$(mktemp); TEMP_FILES+=("\$passphrase_file")
+      if [ -t 0 ]; then
+        read -r -s -p "Enter GPG passphrase for decryption: " GPG_PASSPHRASE; echo >&2
+      else
+        read -r GPG_PASSPHRASE
+      fi
+      echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
+
+      echo "--> Waiting for incoming encrypted data..."
+      nc -l "\$listen_port" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" -d 2>/dev/null | zstd -d | tar -xvf -
+    else
+      echo "--> Waiting for incoming data..."
+      nc -l "\$listen_port" | zstd -d | tar -xvf -
+    fi
+    local listen_status=\$?
+
+    echo ""
+    if [ "\$listen_status" -eq 0 ]; then
+      echo "--- Data Exchange Complete ---"
+      echo "  Files received and extracted to current directory."
+    else
+      echo "--- Data Exchange Failed ---" >&2
+    fi
+    return \$listen_status
+  fi
+
   echo "--- Decompression & Verification Script ---"
   echo "--> Checking for required tools..."
   local required_tools=("tar" "zstd" "sha512sum")
