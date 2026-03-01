@@ -221,6 +221,7 @@ teardown() {
     # Test: listen with no port should fail
     run ./project_a_decompress.sh listen
     [ "$status" -eq 2 ]
+    assert_output --partial "requires a port argument"
 }
 
 @test "listen: decompress script listen subcommand with invalid port should fail" {
@@ -239,6 +240,7 @@ teardown() {
     # Test: listen with non-numeric port should fail
     run ./project_a_decompress.sh listen abc
     [ "$status" -eq 2 ]
+    assert_output --partial "Port must be a number"
 }
 
 @test "listen: decompress script listen subcommand with out-of-range port should fail" {
@@ -257,6 +259,7 @@ teardown() {
     # Test: listen with out-of-range port should fail
     run ./project_a_decompress.sh listen 99999
     [ "$status" -eq 2 ]
+    assert_output --partial "Port must be in the range 1-65535"
 }
 
 @test "listen: decompress script should receive and extract streamed data" {
