@@ -1,5 +1,8 @@
 #!/usr/bin/env bats
 
+# Load GPG test helper for asymmetric encryption tests
+load "${BATS_TEST_DIRNAME}/test_helper_gpg.sh"
+
 # Manually define assert functions
 assert_success() {
     if [ "$status" -ne 0 ]; then
@@ -298,4 +301,90 @@ teardown() {
 
     # Verify files were received and extracted
     [ -f "file1.txt" ] || [ -f "./file1.txt" ]
+}
+
+@test "net-stream: should stream asymmetric GPG-encrypted data to a network port" {
+    # Skip if GPG is not available
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "gpg is not available, skipping asymmetric GPG streaming test"
+    fi
+
+    cd "${OUTPUT_DIR}"
+    mkdir -p asym_stream && cd asym_stream
+
+    # Set up GPG test environment with signer and recipient keys
+    gpg_skip_if_unavailable
+    local gnupghome="$(gpg_setup_test_env)"
+    source "$gnupghome/test_env_vars"
+
+    # Find a free ephemeral port
+    PORT=$(find_free_port)
+
+    # Start netcat listener
+    nc -l "$PORT" > received.tar.zst.gpg &
+    NC_PID=$!
+    sleep 1
+
+    # Stream data with asymmetric GPG encryption (sign + encrypt for recipient)
+    run bash -c "echo 'testpassword' | GNUPGHOME='${GNUPGHOME}' ${TARZST_CMD} -s ${GPG_SIGNER_KEY} -r ${GPG_RECIPIENT_KEY} -n localhost:${PORT} ${SOURCE_DIR}"
+    assert_success
+    assert_output --partial "Stream Complete"
+
+    # Wait for listener to finish
+    wait "$NC_PID" 2>/dev/null || true
+
+    # Verify received data can be decrypted with recipient's key and contains expected files
+    [ -s "received.tar.zst.gpg" ]
+    run bash -c "echo 'testpassword' | GNUPGHOME='${GNUPGHOME}' gpg --batch --pinentry-mode loopback --passphrase-fd 0 --trust-model always -d received.tar.zst.gpg 2>/dev/null | zstd -d | tar -tf -"
+    assert_success
+    assert_output --partial "file1.txt"
+
+    # Cleanup GPG environment
+    gpg_cleanup_test_env
+}
+
+@test "listen: decompress script should receive asymmetric GPG-encrypted streamed data" {
+    # Skip if GPG is not available
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "gpg is not available, skipping asymmetric listen test"
+    fi
+
+    cd "${OUTPUT_DIR}"
+    mkdir -p asym_listen && cd asym_listen
+
+    # Set up GPG test environment with signer and recipient keys
+    gpg_skip_if_unavailable
+    local gnupghome="$(gpg_setup_test_env)"
+    source "$gnupghome/test_env_vars"
+
+    # First create an archive with asymmetric encryption to generate the decompress script
+    run bash -c "echo 'testpassword' | GNUPGHOME='${GNUPGHOME}' ${TARZST_CMD} -s ${GPG_SIGNER_KEY} -r ${GPG_RECIPIENT_KEY} ${SOURCE_DIR}"
+    assert_success
+
+    # Ensure the decompress script was generated
+    [ -f "project_a_decompress.sh" ]
+
+    # Create a separate directory for the listener to extract into
+    mkdir -p received && cd received
+
+    # Find a free ephemeral port
+    PORT=$(find_free_port)
+
+    # Start listener using the decompress script's listen subcommand
+    # Pipe the recipient's passphrase for GPG decryption of their private key
+    echo 'testpassword' | GNUPGHOME="${GNUPGHOME}" ../project_a_decompress.sh listen "$PORT" &
+    NC_PID=$!
+    sleep 1
+
+    # Stream asymmetric GPG-encrypted data to the listener
+    run bash -c "echo 'testpassword' | GNUPGHOME='${GNUPGHOME}' ${TARZST_CMD} -s ${GPG_SIGNER_KEY} -r ${GPG_RECIPIENT_KEY} -n localhost:${PORT} ${SOURCE_DIR}"
+    assert_success
+
+    wait "$NC_PID" 2>/dev/null || true
+
+    # Verify files were received and extracted
+    [ -f "file1.txt" ] || [ -f "./file1.txt" ]
+
+    # Cleanup GPG environment
+    gpg_cleanup_test_env
 }

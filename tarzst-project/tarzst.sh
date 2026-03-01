@@ -640,8 +640,9 @@ run_decompress() {
     echo ""
 
     if [ "\$IS_GPG_USED" -eq 1 ]; then
-      # Read passphrase for GPG decryption
+      # Read passphrase for GPG decryption (symmetric or asymmetric private key)
       local passphrase_file=\$(mktemp); TEMP_FILES+=("\$passphrase_file")
+      local gpg_stderr_file=\$(mktemp); TEMP_FILES+=("\$gpg_stderr_file")
       if [ -t 0 ]; then
         read -r -s -p "Enter GPG passphrase for decryption: " GPG_PASSPHRASE; echo >&2
       else
@@ -650,7 +651,8 @@ run_decompress() {
       echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
 
       echo "--> Waiting for incoming encrypted data..."
-      nc -l "\$listen_port" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" -d 2>/dev/null | zstd -d | tar -xvf -
+      echo "    Supports both symmetric (password) and asymmetric (public key) encryption."
+      nc -l "\$listen_port" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
     else
       echo "--> Waiting for incoming data..."
       nc -l "\$listen_port" | zstd -d | tar -xvf -
@@ -658,6 +660,15 @@ run_decompress() {
     local listen_status=\$?
 
     echo ""
+    if [ "\$IS_GPG_USED" -eq 1 ]; then
+      if grep -q "Good signature from" "\$gpg_stderr_file" 2>/dev/null; then
+        echo "    OK: GPG signature verified."
+        grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
+      elif grep -q "bad signature" "\$gpg_stderr_file" 2>/dev/null; then
+        echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
+      fi
+    fi
+
     if [ "\$listen_status" -eq 0 ]; then
       echo "--- Data Exchange Complete ---"
       echo "  Files received and extracted to current directory."
