@@ -16,13 +16,13 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          tarzst = pkgs.callPackage ./tarzst-project/package.nix { };
+          tarzst = pkgs.callPackage ./package.nix { };
           default = self.packages.${system}.tarzst;
         }
       );
 
       overlays.default = final: prev: {
-        tarzst = final.callPackage ./tarzst-project/package.nix { };
+        tarzst = final.callPackage ./package.nix { };
       };
     };
 }

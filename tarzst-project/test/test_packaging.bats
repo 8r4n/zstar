@@ -48,9 +48,9 @@ assert_symlink() {
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
-    FORMULA="${REPO_ROOT}/Formula/tarzst.rb"
-    DEBIAN_DIR="${BATS_TEST_DIRNAME}/../debian"
-    SPEC_FILE="${BATS_TEST_DIRNAME}/../tarzst.spec"
+    FORMULA="${REPO_ROOT}/packages/Formula/tarzst.rb"
+    DEBIAN_DIR="${REPO_ROOT}/packages/debian"
+    SPEC_FILE="${REPO_ROOT}/packages/tarzst.spec"
     SCRIPT_FILE="${BATS_TEST_DIRNAME}/../tarzst.sh"
 }
 

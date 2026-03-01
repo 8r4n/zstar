@@ -23,7 +23,8 @@ else
 fi
 
 # --- Global Variables ---
-readonly PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+readonly PACKAGES_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+readonly PROJECT_ROOT="$( cd "${PACKAGES_DIR}/../tarzst-project" &> /dev/null && pwd )"
 readonly SCRIPT_NAME="tarzst.sh"
 readonly SPEC_NAME="tarzst.spec"
 
@@ -117,7 +118,7 @@ package_rpm() {
     # 2. Copy source files to the correct locations
     info "Copying source files to rpmbuild tree..."
     cp "$PROJECT_ROOT/$SCRIPT_NAME" "${rpmbuild_dir}/SOURCES/"
-    cp "$PROJECT_ROOT/$SPEC_NAME" "${rpmbuild_dir}/SPECS/"
+    cp "$PACKAGES_DIR/$SPEC_NAME" "${rpmbuild_dir}/SPECS/"
     success "Source files copied."
 
     # 3. Run the build

@@ -17,7 +17,7 @@ stdenvNoCC.mkDerivation {
   pname = "tarzst";
   version = "3.1";
 
-  src = ./.;
+  src = ../tarzst-project;
 
   nativeBuildInputs = [ makeWrapper bash ];
 
