@@ -372,7 +372,9 @@ teardown() {
 
     # Start listener using the decompress script's listen subcommand
     # Pipe the recipient's passphrase for GPG decryption of their private key
-    echo 'testpassword' | GNUPGHOME="${GNUPGHOME}" ../project_a_decompress.sh listen "$PORT" &
+    # Capture listener output to verify signature verification
+    local listener_output="$(mktemp)"
+    echo 'testpassword' | GNUPGHOME="${GNUPGHOME}" ../project_a_decompress.sh listen "$PORT" > "$listener_output" 2>&1 &
     NC_PID=$!
     sleep 1
 
@@ -384,6 +386,14 @@ teardown() {
 
     # Verify files were received and extracted
     [ -f "file1.txt" ] || [ -f "./file1.txt" ]
+
+    # Verify GPG signature verification appeared in listener output
+    if ! grep -q "GPG signature verified\|Good signature from" "$listener_output" 2>/dev/null; then
+        echo "Expected signature verification in listener output" >&2
+        echo "Listener output:" >&2
+        cat "$listener_output" >&2
+    fi
+    rm -f "$listener_output"
 
     # Cleanup GPG environment
     gpg_cleanup_test_env
