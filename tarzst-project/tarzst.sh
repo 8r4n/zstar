@@ -66,6 +66,9 @@ Options:
   -l, --level <num>        zstd compression level (1-19). Higher is smaller but slower. Default: 3.
   -o, --output <name>      Specify a custom base name for the output files.
   -e, --exclude <pattern>  Exclude files matching the pattern. Can be used multiple times.
+      --no-compress        Skip tar and compression for a single file. The file is copied
+                           as-is (with optional GPG encryption/signing and SELinux labeling).
+                           Only works with a single regular file input.
   -h, --help               Show this help message.
 
 Security Options:
@@ -315,7 +318,10 @@ check_dependencies() {
         [gpg]="gnupg" [numfmt]="coreutils" [nc]="netcat"
     )
 
-    local required_tools=("tar" "zstd" "sha512sum" "numfmt")
+    local required_tools=("sha512sum" "numfmt")
+    if [ "$NO_COMPRESS" -eq 0 ]; then
+      required_tools+=("tar" "zstd")
+    fi
     [ "$check_gpg" -eq 1 ] && required_tools+=("gpg")
     [ -n "$NET_STREAM" ] && required_tools+=("nc")
 
@@ -351,6 +357,7 @@ main() {
   local BURN_AFTER_READING=0
   local USE_ENCRYPTED_TMPFS=0
   local NIXOS_ISO=0
+  local NO_COMPRESS=0
   local NET_STREAM=""
   local NET_STREAM_HOST=""
   local NET_STREAM_PORT=""
@@ -373,6 +380,7 @@ main() {
       -b|--burn-after-reading) BURN_AFTER_READING=1; shift ;;
       -E|--encrypted-tmpfs) USE_ENCRYPTED_TMPFS=1; shift ;;
       -I|--nixos-iso) NIXOS_ISO=1; shift ;;
+      --no-compress) NO_COMPRESS=1; shift ;;
       -n|--net-stream)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a host:port argument." >&2; exit 2; fi
         NET_STREAM="$2"
@@ -409,6 +417,14 @@ main() {
   if [ "$USE_ENCRYPTED_TMPFS" -eq 1 ] && [ "$BURN_AFTER_READING" -eq 0 ]; then
     echo "Warning: --encrypted-tmpfs is most effective when combined with --burn-after-reading (-b)." >&2
   fi
+  if [ "$NO_COMPRESS" -eq 1 ]; then
+    if [ ${#INPUT_FILES[@]} -ne 1 ]; then
+      echo "Error: --no-compress requires exactly one input file." >&2; exit 2
+    fi
+    if [ ! -f "${INPUT_FILES[0]}" ]; then
+      echo "Error: --no-compress requires a regular file." >&2; exit 2
+    fi
+  fi
   
   check_dependencies # This function will exit if dependencies are missing
   
@@ -434,6 +450,9 @@ main() {
 
   # --- Step 4: Define Filenames and GPG Command ---
   local archive_ext=".tar.zst"
+  if [ "$NO_COMPRESS" -eq 1 ]; then
+    archive_ext=""
+  fi
   local final_ext="$archive_ext"
   local is_gpg_used=0
   local -a gpg_cmd=()
@@ -512,11 +531,32 @@ main() {
   local full_archive_name="${OUTPUT_BASE}${final_ext}"
   local checksum_file="${OUTPUT_BASE}${final_ext}.sha512"
   # Note: We already changed to input_dir on line 242, no need to cd again
-  
-  local -a tar_cmd=("tar" "-cf" "-" "${TAR_EXCLUDE_ARGS[@]}" "--" "${relative_inputs[@]}")
-  local -a zstd_cmd=("zstd" "-T0" "-${COMPRESSION_LEVEL}")
-  
-  local pipeline_str="${tar_cmd[*]} | ${PV_CMD} | ${zstd_cmd[*]}"
+
+  # Compute original filename for no-compress single-file mode
+  local original_filename=""
+  if [ "$NO_COMPRESS" -eq 1 ]; then
+    original_filename="$(basename "${INPUT_FILES[0]}")"
+    # Prevent overwriting the input file when output has no extension
+    if [ "$is_gpg_used" -eq 0 ]; then
+      local resolved_input; resolved_input="$(realpath -- "${INPUT_FILES[0]}")"
+      local resolved_output_dir; resolved_output_dir="$(realpath -- "${original_dir}")"
+      local resolved_output; resolved_output="${resolved_output_dir%/}/${full_archive_name}"
+      if [ "$resolved_input" = "$resolved_output" ]; then
+        echo "Error: Output file would overwrite the input file. Use -o to specify a different output name." >&2; exit 1
+      fi
+    fi
+  fi
+
+  local pipeline_str=""
+  if [ "$NO_COMPRESS" -eq 1 ]; then
+    local quoted_input
+    quoted_input=$(printf '%q' "${relative_inputs[0]}")
+    pipeline_str="cat -- ${quoted_input} | ${PV_CMD}"
+  else
+    local -a tar_cmd=("tar" "-cf" "-" "${TAR_EXCLUDE_ARGS[@]}" "--" "${relative_inputs[@]}")
+    local -a zstd_cmd=("zstd" "-T0" "-${COMPRESSION_LEVEL}")
+    pipeline_str="${tar_cmd[*]} | ${PV_CMD} | ${zstd_cmd[*]}"
+  fi
   if [ "$is_gpg_used" -eq 1 ]; then
       pipeline_str+=" | ${gpg_cmd[*]}"
   fi
@@ -602,8 +642,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Configuration ---
-readonly BASE_NAME="${OUTPUT_BASE}"
+readonly BASE_NAME=${OUTPUT_BASE@Q}
 readonly IS_GPG_USED=${is_gpg_used}
+readonly NO_COMPRESS=${NO_COMPRESS}
+readonly ORIGINAL_FILENAME=${original_filename@Q}
 readonly SELF_ERASE=${BURN_AFTER_READING}
 readonly USE_ENCRYPTED_TMPFS=${USE_ENCRYPTED_TMPFS}
 
@@ -664,7 +706,10 @@ run_decompress() {
     echo "--- Encrypted Real-Time Data Exchange Listener ---"
 
     # Check required tools for listen mode
-    local listen_tools=("nc" "zstd" "tar")
+    local listen_tools=("nc")
+    if [ "\$NO_COMPRESS" -eq 0 ]; then
+      listen_tools+=("tar" "zstd")
+    fi
     [ "\$IS_GPG_USED" -eq 1 ] && listen_tools+=("gpg")
     for tool in "\${listen_tools[@]}"; do
       if ! command -v "\$tool" >/dev/null; then
@@ -701,13 +746,21 @@ run_decompress() {
       # Temporarily disable errexit so we can capture the pipeline status
       # and always display signature verification results
       set +e
-      "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
+      if [ "\$NO_COMPRESS" -eq 0 ]; then
+        "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
+      else
+        "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" > "\$ORIGINAL_FILENAME"
+      fi
       local listen_status=\$?
       set -e
     else
       echo "--> Waiting for incoming data..."
       set +e
-      "\${nc_listen_cmd[@]}" | zstd -d | tar -xvf -
+      if [ "\$NO_COMPRESS" -eq 0 ]; then
+        "\${nc_listen_cmd[@]}" | zstd -d | tar -xvf -
+      else
+        "\${nc_listen_cmd[@]}" > "\$ORIGINAL_FILENAME"
+      fi
       local listen_status=\$?
       set -e
     fi
@@ -733,7 +786,10 @@ run_decompress() {
 
   echo "--- Decompression & Verification Script ---"
   echo "--> Checking for required tools..."
-  local required_tools=("tar" "zstd" "sha512sum")
+  local required_tools=("sha512sum")
+  if [ "\$NO_COMPRESS" -eq 0 ]; then
+    required_tools+=("tar" "zstd")
+  fi
   [ "\$IS_GPG_USED" -eq 1 ] && required_tools+=("gpg")
   [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ] && required_tools+=("cryptsetup" "mkfs.ext4")
   for tool in \${required_tools[@]}; do
@@ -745,6 +801,7 @@ run_decompress() {
   echo "    All required tools found."
 
   local archive_ext=".tar.zst"
+  [ "\$NO_COMPRESS" -eq 1 ] && archive_ext=""
   local final_ext="\$archive_ext"
   [ "\$IS_GPG_USED" -eq 1 ] && final_ext="\${archive_ext}.gpg"
 
@@ -779,10 +836,10 @@ run_decompress() {
   if [ "\${1:-extract}" = "list" ]; then
       echo ""
       echo "--> Verifying and listing archive contents (won't save to disk)..."
-      [ "\$IS_GPG_USED" -eq 1 ] && echo "    Password/passphrase may be required."
-      
-      # Handle passphrase for GPG operations
-      if [ "\$IS_GPG_USED" -eq 1 ]; then
+      if [ "\$NO_COMPRESS" -eq 1 ]; then
+          echo "\$ORIGINAL_FILENAME"
+      elif [ "\$IS_GPG_USED" -eq 1 ]; then
+          [ "\$IS_GPG_USED" -eq 1 ] && echo "    Password/passphrase may be required."
           local passphrase_file=\$(mktemp); TEMP_FILES+=("\$passphrase_file")
           if [ -t 0 ]; then
               read -r -s -p "Enter passphrase: " GPG_PASSPHRASE; echo >&2
@@ -802,58 +859,107 @@ run_decompress() {
       
       echo ""
       echo "--> Preparing for extraction..."
-      if [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ]; then
-          setup_encrypted_tmpfs
-          extract_dir="\$ENCRYPTED_TMPFS_MOUNT"
-          echo "    Files will be extracted to encrypted RAM disk."
-      elif [ -d "\$extract_dir" ]; then
-          # Handle non-interactive mode
-          if [ -t 0 ]; then
-              printf "    Warning: Directory '\$extract_dir' already exists. Overwrite contents? [y/N] "
-              read -r confirm
-              if [[ ! "\$confirm" =~ ^[yY]([eE][sS])?\$ ]]; then echo "    Aborting."; exit 0; fi
-          else
-              # Non-interactive mode - assume yes if stdin is not a terminal
-              echo "    Warning: Directory '\$extract_dir' already exists. Overwriting in non-interactive mode."
-          fi
-      else
-          mkdir -p "\$extract_dir"
-      fi
-      
-      echo "--> Decrypting, verifying signature (if any), and extracting to '\$extract_dir/'..."
-      [ "\$IS_GPG_USED" -eq 1 ] && echo "    Password/passphrase may be required."
 
       local gpg_stderr_file; gpg_stderr_file=\$(mktemp); TEMP_FILES+=("\$gpg_stderr_file")
-      
-      # Handle passphrase for GPG operations
-      if [ "\$IS_GPG_USED" -eq 1 ]; then
-          local passphrase_file=\$(mktemp); TEMP_FILES+=("\$passphrase_file")
-          if [ -t 0 ]; then
-              read -r -s -p "Enter passphrase: " GPG_PASSPHRASE; echo >&2
+
+      if [ "\$NO_COMPRESS" -eq 1 ]; then
+          # Single file mode: restore to current directory (or encrypted tmpfs)
+          local output_target="."
+          if [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ]; then
+              setup_encrypted_tmpfs
+              output_target="\$ENCRYPTED_TMPFS_MOUNT"
+              echo "    File will be restored to encrypted RAM disk."
+          fi
+          local dest_file="\$output_target/\$ORIGINAL_FILENAME"
+          echo "--> Restoring file as '\$dest_file'..."
+          [ "\$IS_GPG_USED" -eq 1 ] && echo "    Password/passphrase may be required."
+          if [ "\$IS_GPG_USED" -eq 1 ]; then
+              local passphrase_file=\$(mktemp); TEMP_FILES+=("\$passphrase_file")
+              if [ -t 0 ]; then
+                  read -r -s -p "Enter passphrase: " GPG_PASSPHRASE; echo >&2
+              else
+                  read -r GPG_PASSPHRASE
+              fi
+              echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
+              eval "\$source_stream_cmd" | \$pv_cmd | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" > "\$dest_file"
           else
-              read -r GPG_PASSPHRASE
+              local src_real=\$(realpath -- "\$single_archive_file" 2>/dev/null || echo "")
+              local dst_real=\$(realpath -- "\$dest_file" 2>/dev/null || echo "")
+              if [ -n "\$src_real" ] && [ "\$src_real" = "\$dst_real" ]; then
+                  echo "    File is already in place."
+              else
+                  cp "\$single_archive_file" "\$dest_file"
+              fi
           fi
-          echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
-          eval "\$source_stream_cmd" | \$pv_cmd | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf - -C "\$extract_dir"
-      else
-          eval "\$source_stream_cmd" | \$pv_cmd | zstd -d | tar -xvf - -C "\$extract_dir"
-      fi
-      
-      if [ "\$IS_GPG_USED" -eq 1 ]; then
-          if grep -q "Good signature from" "\$gpg_stderr_file"; then
-              echo "    OK: GPG signature verified."
-              grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
-          elif grep -qi "bad signature" "\$gpg_stderr_file"; then
-              echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
+
+          if [ "\$IS_GPG_USED" -eq 1 ]; then
+              if grep -q "Good signature from" "\$gpg_stderr_file"; then
+                  echo "    OK: GPG signature verified."
+                  grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
+              elif grep -qi "bad signature" "\$gpg_stderr_file"; then
+                  echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
+              fi
           fi
-      fi
-      
-      echo ""
-      if [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ]; then
-          echo "    Success! Files extracted to encrypted RAM disk at '\$extract_dir'."
-          echo "    Note: Data exists only in encrypted memory and will be gone when unmounted."
+
+          echo ""
+          if [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ]; then
+              echo "    Success! File restored to encrypted RAM disk at '\$dest_file'."
+              echo "    Note: Data exists only in encrypted memory and will be gone when unmounted."
+          else
+              echo "    Success! File restored as '\$dest_file'."
+          fi
       else
-          echo "    Success! All files have been extracted to the '\$extract_dir' directory."
+          # Normal tar archive extraction
+          if [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ]; then
+              setup_encrypted_tmpfs
+              extract_dir="\$ENCRYPTED_TMPFS_MOUNT"
+              echo "    Files will be extracted to encrypted RAM disk."
+          elif [ -d "\$extract_dir" ]; then
+              # Handle non-interactive mode
+              if [ -t 0 ]; then
+                  printf "    Warning: Directory '\$extract_dir' already exists. Overwrite contents? [y/N] "
+                  read -r confirm
+                  if [[ ! "\$confirm" =~ ^[yY]([eE][sS])?\$ ]]; then echo "    Aborting."; exit 0; fi
+              else
+                  # Non-interactive mode - assume yes if stdin is not a terminal
+                  echo "    Warning: Directory '\$extract_dir' already exists. Overwriting in non-interactive mode."
+              fi
+          else
+              mkdir -p "\$extract_dir"
+          fi
+       
+          echo "--> Decrypting, verifying signature (if any), and extracting to '\$extract_dir/'..."
+          [ "\$IS_GPG_USED" -eq 1 ] && echo "    Password/passphrase may be required."
+       
+          if [ "\$IS_GPG_USED" -eq 1 ]; then
+              local passphrase_file=\$(mktemp); TEMP_FILES+=("\$passphrase_file")
+              if [ -t 0 ]; then
+                  read -r -s -p "Enter passphrase: " GPG_PASSPHRASE; echo >&2
+              else
+                  read -r GPG_PASSPHRASE
+              fi
+              echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
+              eval "\$source_stream_cmd" | \$pv_cmd | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf - -C "\$extract_dir"
+          else
+              eval "\$source_stream_cmd" | \$pv_cmd | zstd -d | tar -xvf - -C "\$extract_dir"
+          fi
+       
+          if [ "\$IS_GPG_USED" -eq 1 ]; then
+              if grep -q "Good signature from" "\$gpg_stderr_file"; then
+                  echo "    OK: GPG signature verified."
+                  grep "Good signature from" "\$gpg_stderr_file" | sed 's/^/    /'
+              elif grep -qi "bad signature" "\$gpg_stderr_file"; then
+                  echo "    !!! WARNING: INVALID GPG SIGNATURE !!! The data may have been tampered with." >&2
+              fi
+          fi
+       
+          echo ""
+          if [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ]; then
+              echo "    Success! Files extracted to encrypted RAM disk at '\$extract_dir'."
+              echo "    Note: Data exists only in encrypted memory and will be gone when unmounted."
+          else
+              echo "    Success! All files have been extracted to the '\$extract_dir' directory."
+          fi
       fi
 
       if [ "\$SELF_ERASE" -eq 1 ]; then
