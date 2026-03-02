@@ -121,3 +121,104 @@ teardown() {
     [ "$status" -eq 2 ]
     assert_output --partial "exactly one"
 }
+
+# --- GPG helper for no-compress tests ---
+# Sets up a temporary GPG environment with signer and recipient keys.
+# Sets GPG_SIGNER_KEY, GPG_RECIPIENT_KEY, GNUPGHOME env vars.
+setup_gpg_env() {
+    if ! command -v gpg >/dev/null 2>&1; then
+        skip "GPG is not available"
+    fi
+
+    NC_GPG_HOME=$(mktemp -d)
+    export GNUPGHOME="$NC_GPG_HOME"
+    chmod 700 "$NC_GPG_HOME"
+
+    cat > "$NC_GPG_HOME/gpg.conf" << GPGEOF
+batch
+no-tty
+pinentry-mode loopback
+no-permission-warning
+GPGEOF
+
+    echo "allow-loopback-pinentry" > "$NC_GPG_HOME/gpg-agent.conf"
+    gpgconf --homedir "$NC_GPG_HOME" --launch gpg-agent 2>/dev/null || true
+
+    cat > "$NC_GPG_HOME/signer-spec.txt" << KEYEOF
+%echo Generating signer key
+Key-Type: RSA
+Key-Length: 2048
+Subkey-Type: RSA
+Subkey-Length: 2048
+Name-Real: NC Signer
+Name-Email: nc-signer@test.local
+Expire-Date: 0
+Passphrase: testpassword
+%commit
+%echo done
+KEYEOF
+    gpg --batch --homedir "$NC_GPG_HOME" --full-generate-key "$NC_GPG_HOME/signer-spec.txt" 2>/dev/null
+
+    cat > "$NC_GPG_HOME/recipient-spec.txt" << KEYEOF
+%echo Generating recipient key
+Key-Type: RSA
+Key-Length: 2048
+Subkey-Type: RSA
+Subkey-Length: 2048
+Name-Real: NC Recipient
+Name-Email: nc-recipient@test.local
+Expire-Date: 0
+Passphrase: testpassword
+%commit
+%echo done
+KEYEOF
+    gpg --batch --homedir "$NC_GPG_HOME" --full-generate-key "$NC_GPG_HOME/recipient-spec.txt" 2>/dev/null
+
+    GPG_SIGNER_KEY=$(gpg --homedir "$NC_GPG_HOME" --list-keys --with-colons nc-signer@test.local | awk -F: '/^pub:/ {print $5}')
+    GPG_RECIPIENT_KEY=$(gpg --homedir "$NC_GPG_HOME" --list-keys --with-colons nc-recipient@test.local | awk -F: '/^pub:/ {print $5}')
+}
+
+cleanup_gpg_env() {
+    if [ -n "${NC_GPG_HOME:-}" ] && [ -d "${NC_GPG_HOME:-}" ]; then
+        rm -rf "$NC_GPG_HOME"
+        unset GNUPGHOME
+    fi
+}
+
+@test "no-compress: asymmetric GPG sign+encrypt should create .gpg archive" {
+    setup_gpg_env
+    cd "${OUTPUT_DIR}"
+    run bash -c "echo testpassword | GNUPGHOME='$NC_GPG_HOME' '${TARZST_CMD}' --no-compress -s '$GPG_SIGNER_KEY' -r '$GPG_RECIPIENT_KEY' -o 'nc_asym' '${SOURCE_DIR}/file1.txt'"
+    assert_success
+    assert_file_exist "nc_asym.gpg"
+    assert_file_not_exist "nc_asym.tar.zst.gpg"
+    assert_file_exist "nc_asym.gpg.sha512"
+    assert_file_exist "nc_asym_decompress.sh"
+    cleanup_gpg_env
+}
+
+@test "no-compress: asymmetric GPG round-trip should restore file correctly" {
+    setup_gpg_env
+    cd "${OUTPUT_DIR}"
+    echo testpassword | GNUPGHOME="$NC_GPG_HOME" "${TARZST_CMD}" --no-compress -s "$GPG_SIGNER_KEY" -r "$GPG_RECIPIENT_KEY" -o "nc_asym_rt" "${SOURCE_DIR}/file1.txt"
+    rm -f file1.txt  # Remove any leftover from previous tests
+    run bash -c "echo testpassword | GNUPGHOME='$NC_GPG_HOME' ./nc_asym_rt_decompress.sh"
+    assert_success
+    assert_output --partial "GPG signature verified"
+    assert_file_exist "${OUTPUT_DIR}/file1.txt"
+    diff -q "${SOURCE_DIR}/file1.txt" "${OUTPUT_DIR}/file1.txt"
+    cleanup_gpg_env
+}
+
+@test "no-compress: sign-only mode should create .gpg archive and verify signature" {
+    setup_gpg_env
+    cd "${OUTPUT_DIR}"
+    echo testpassword | GNUPGHOME="$NC_GPG_HOME" "${TARZST_CMD}" --no-compress -s "$GPG_SIGNER_KEY" -o "nc_sign" "${SOURCE_DIR}/file1.txt"
+    rm -f file1.txt
+    run bash -c "echo testpassword | GNUPGHOME='$NC_GPG_HOME' ./nc_sign_decompress.sh"
+    assert_success
+    assert_output --partial "GPG signature verified"
+    assert_file_exist "${OUTPUT_DIR}/file1.txt"
+    diff -q "${SOURCE_DIR}/file1.txt" "${OUTPUT_DIR}/file1.txt"
+    cleanup_gpg_env
+}
