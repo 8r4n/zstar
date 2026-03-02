@@ -59,45 +59,44 @@ teardown() {
     cd ../..
 }
 
-@test "no-compress: should create a .tar archive (not .tar.zst)" {
+@test "no-compress: should copy a single file with checksum and script" {
     cd "${OUTPUT_DIR}"
-    run "${TARZST_CMD}" --no-compress -o "nc_basic" "${SOURCE_DIR}"
+    run "${TARZST_CMD}" --no-compress -o "nc_basic" "${SOURCE_DIR}/file1.txt"
     assert_success
-    assert_file_exist "nc_basic.tar"
+    assert_file_exist "nc_basic"
+    assert_file_not_exist "nc_basic.tar"
     assert_file_not_exist "nc_basic.tar.zst"
-    assert_file_exist "nc_basic.tar.sha512"
+    assert_file_exist "nc_basic.sha512"
     assert_file_exist "nc_basic_decompress.sh"
     assert_file_executable "nc_basic_decompress.sh"
 }
 
-@test "no-compress: archive should be a valid tar file" {
+@test "no-compress: output file should be identical to the input" {
     cd "${OUTPUT_DIR}"
-    "${TARZST_CMD}" --no-compress -o "nc_valid" "${SOURCE_DIR}"
-    # Verify it's a valid tar (not zstd-compressed)
-    run tar -tf "nc_valid.tar"
-    assert_success
-    assert_output --partial "file1.txt"
+    "${TARZST_CMD}" --no-compress -o "nc_identical" "${SOURCE_DIR}/file1.txt"
+    diff -q "${SOURCE_DIR}/file1.txt" "nc_identical"
 }
 
 @test "no-compress: sha512 checksum should verify successfully" {
     cd "${OUTPUT_DIR}"
-    "${TARZST_CMD}" --no-compress -o "nc_checksum" "${SOURCE_DIR}"
-    run sha512sum -c "nc_checksum.tar.sha512"
+    "${TARZST_CMD}" --no-compress -o "nc_checksum" "${SOURCE_DIR}/file1.txt"
+    run sha512sum -c "nc_checksum.sha512"
     assert_success
 }
 
-@test "no-compress: decompress script should extract correctly" {
+@test "no-compress: decompress script should restore file correctly" {
     cd "${OUTPUT_DIR}"
-    "${TARZST_CMD}" --no-compress -o "nc_extract" "${SOURCE_DIR}"
+    "${TARZST_CMD}" --no-compress -o "nc_extract" "${SOURCE_DIR}/file1.txt"
     run ./nc_extract_decompress.sh
     assert_success
-    assert_file_exist "${OUTPUT_DIR}/nc_extract/file1.txt"
-    diff -q "${SOURCE_DIR}/file1.txt" "${OUTPUT_DIR}/nc_extract/file1.txt"
+    # Single file mode restores to current directory as original filename
+    assert_file_exist "${OUTPUT_DIR}/file1.txt"
+    diff -q "${SOURCE_DIR}/file1.txt" "${OUTPUT_DIR}/file1.txt"
 }
 
-@test "no-compress: list subcommand should work without zstd" {
+@test "no-compress: list subcommand should show the filename" {
     cd "${OUTPUT_DIR}"
-    "${TARZST_CMD}" --no-compress -o "nc_list" "${SOURCE_DIR}"
+    "${TARZST_CMD}" --no-compress -o "nc_list" "${SOURCE_DIR}/file1.txt"
     run bash -c "cd '${OUTPUT_DIR}' && ./nc_list_decompress.sh list"
     assert_success
     assert_output --partial "file1.txt"
@@ -109,15 +108,16 @@ teardown() {
     assert_output --partial "--no-compress"
 }
 
-@test "no-compress: should work with --exclude flag" {
+@test "no-compress: should reject directories" {
     cd "${OUTPUT_DIR}"
-    run "${TARZST_CMD}" --no-compress -o "nc_exclude" -e "*.log" "${TEST_DIR}/project_b"
-    assert_success
+    run "${TARZST_CMD}" --no-compress -o "nc_dir" "${SOURCE_DIR}"
+    [ "$status" -eq 2 ]
+    assert_output --partial "regular file"
+}
 
-    run ./nc_exclude_decompress.sh
-    assert_success
-
-    cd "nc_exclude"
-    assert_file_not_exist "report.log"
-    assert_file_exist "data/public.csv"
+@test "no-compress: should reject multiple files" {
+    cd "${OUTPUT_DIR}"
+    run "${TARZST_CMD}" --no-compress -o "nc_multi" "${SOURCE_DIR}/file1.txt" "${SOURCE_DIR}/file2.txt"
+    [ "$status" -eq 2 ]
+    assert_output --partial "exactly one"
 }
