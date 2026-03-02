@@ -538,8 +538,9 @@ main() {
     original_filename="$(basename "${INPUT_FILES[0]}")"
     # Prevent overwriting the input file when output has no extension
     if [ "$is_gpg_used" -eq 0 ]; then
-      local resolved_input; resolved_input="$(realpath "${INPUT_FILES[0]}")"
-      local resolved_output; resolved_output="$(realpath -m "${original_dir}/${full_archive_name}")"
+      local resolved_input; resolved_input="$(realpath -- "${INPUT_FILES[0]}")"
+      local resolved_output_dir; resolved_output_dir="$(realpath -- "${original_dir}")"
+      local resolved_output; resolved_output="${resolved_output_dir%/}/${full_archive_name}"
       if [ "$resolved_input" = "$resolved_output" ]; then
         echo "Error: Output file would overwrite the input file. Use -o to specify a different output name." >&2; exit 1
       fi
@@ -550,7 +551,7 @@ main() {
   if [ "$NO_COMPRESS" -eq 1 ]; then
     local quoted_input
     quoted_input=$(printf '%q' "${relative_inputs[0]}")
-    pipeline_str="cat ${quoted_input} | ${PV_CMD}"
+    pipeline_str="cat -- ${quoted_input} | ${PV_CMD}"
   else
     local -a tar_cmd=("tar" "-cf" "-" "${TAR_EXCLUDE_ARGS[@]}" "--" "${relative_inputs[@]}")
     local -a zstd_cmd=("zstd" "-T0" "-${COMPRESSION_LEVEL}")
@@ -641,10 +642,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Configuration ---
-readonly BASE_NAME="${OUTPUT_BASE}"
+readonly BASE_NAME=${OUTPUT_BASE@Q}
 readonly IS_GPG_USED=${is_gpg_used}
 readonly NO_COMPRESS=${NO_COMPRESS}
-readonly ORIGINAL_FILENAME="${original_filename}"
+readonly ORIGINAL_FILENAME=${original_filename@Q}
 readonly SELF_ERASE=${BURN_AFTER_READING}
 readonly USE_ENCRYPTED_TMPFS=${USE_ENCRYPTED_TMPFS}
 
