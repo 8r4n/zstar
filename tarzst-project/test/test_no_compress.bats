@@ -114,7 +114,9 @@ teardown() {
     run "${TARZST_CMD}" --no-compress -o "nc_exclude" -e "*.log" "${TEST_DIR}/project_b"
     assert_success
 
-    ./nc_exclude_decompress.sh
+    run ./nc_exclude_decompress.sh
+    assert_success
+
     cd "nc_exclude"
     assert_file_not_exist "report.log"
     assert_file_exist "data/public.csv"
