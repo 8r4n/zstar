@@ -56,6 +56,12 @@ setup() {
 }
 
 teardown() {
+    # Clean up GPG test environment if it was created
+    if [ -n "${NC_GPG_HOME:-}" ] && [ -d "${NC_GPG_HOME:-}" ]; then
+        rm -rf "$NC_GPG_HOME"
+        unset GNUPGHOME
+        unset NC_GPG_HOME
+    fi
     cd ../..
 }
 
@@ -178,13 +184,6 @@ KEYEOF
     GPG_RECIPIENT_KEY=$(gpg --homedir "$NC_GPG_HOME" --list-keys --with-colons nc-recipient@test.local | awk -F: '/^pub:/ {print $5}')
 }
 
-cleanup_gpg_env() {
-    if [ -n "${NC_GPG_HOME:-}" ] && [ -d "${NC_GPG_HOME:-}" ]; then
-        rm -rf "$NC_GPG_HOME"
-        unset GNUPGHOME
-    fi
-}
-
 @test "no-compress: asymmetric GPG sign+encrypt should create .gpg archive" {
     setup_gpg_env
     cd "${OUTPUT_DIR}"
@@ -194,7 +193,6 @@ cleanup_gpg_env() {
     assert_file_not_exist "nc_asym.tar.zst.gpg"
     assert_file_exist "nc_asym.gpg.sha512"
     assert_file_exist "nc_asym_decompress.sh"
-    cleanup_gpg_env
 }
 
 @test "no-compress: asymmetric GPG round-trip should restore file correctly" {
@@ -207,7 +205,6 @@ cleanup_gpg_env() {
     assert_output --partial "GPG signature verified"
     assert_file_exist "${OUTPUT_DIR}/file1.txt"
     diff -q "${SOURCE_DIR}/file1.txt" "${OUTPUT_DIR}/file1.txt"
-    cleanup_gpg_env
 }
 
 @test "no-compress: sign-only mode should create .gpg archive and verify signature" {
@@ -220,5 +217,4 @@ cleanup_gpg_env() {
     assert_output --partial "GPG signature verified"
     assert_file_exist "${OUTPUT_DIR}/file1.txt"
     diff -q "${SOURCE_DIR}/file1.txt" "${OUTPUT_DIR}/file1.txt"
-    cleanup_gpg_env
 }
