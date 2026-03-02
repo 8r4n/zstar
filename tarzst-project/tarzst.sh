@@ -422,7 +422,7 @@ main() {
       echo "Error: --no-compress requires exactly one input file." >&2; exit 2
     fi
     if [ ! -f "${INPUT_FILES[0]}" ]; then
-      echo "Error: --no-compress requires a regular file, not a directory." >&2; exit 2
+      echo "Error: --no-compress requires a regular file." >&2; exit 2
     fi
   fi
   
