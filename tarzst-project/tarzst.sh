@@ -66,6 +66,8 @@ Options:
   -l, --level <num>        zstd compression level (1-19). Higher is smaller but slower. Default: 3.
   -o, --output <name>      Specify a custom base name for the output files.
   -e, --exclude <pattern>  Exclude files matching the pattern. Can be used multiple times.
+      --no-compress        Skip compression (store as plain tar). Keeps all other features
+                           including GPG encryption/signing and SELinux context labeling.
   -h, --help               Show this help message.
 
 Security Options:
@@ -315,7 +317,8 @@ check_dependencies() {
         [gpg]="gnupg" [numfmt]="coreutils" [nc]="netcat"
     )
 
-    local required_tools=("tar" "zstd" "sha512sum" "numfmt")
+    local required_tools=("tar" "sha512sum" "numfmt")
+    [ "$NO_COMPRESS" -eq 0 ] && required_tools+=("zstd")
     [ "$check_gpg" -eq 1 ] && required_tools+=("gpg")
     [ -n "$NET_STREAM" ] && required_tools+=("nc")
 
@@ -351,6 +354,7 @@ main() {
   local BURN_AFTER_READING=0
   local USE_ENCRYPTED_TMPFS=0
   local NIXOS_ISO=0
+  local NO_COMPRESS=0
   local NET_STREAM=""
   local NET_STREAM_HOST=""
   local NET_STREAM_PORT=""
@@ -373,6 +377,7 @@ main() {
       -b|--burn-after-reading) BURN_AFTER_READING=1; shift ;;
       -E|--encrypted-tmpfs) USE_ENCRYPTED_TMPFS=1; shift ;;
       -I|--nixos-iso) NIXOS_ISO=1; shift ;;
+      --no-compress) NO_COMPRESS=1; shift ;;
       -n|--net-stream)
         if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then echo "Error: Option '$1' requires a host:port argument." >&2; exit 2; fi
         NET_STREAM="$2"
@@ -434,6 +439,9 @@ main() {
 
   # --- Step 4: Define Filenames and GPG Command ---
   local archive_ext=".tar.zst"
+  if [ "$NO_COMPRESS" -eq 1 ]; then
+    archive_ext=".tar"
+  fi
   local final_ext="$archive_ext"
   local is_gpg_used=0
   local -a gpg_cmd=()
@@ -516,7 +524,10 @@ main() {
   local -a tar_cmd=("tar" "-cf" "-" "${TAR_EXCLUDE_ARGS[@]}" "--" "${relative_inputs[@]}")
   local -a zstd_cmd=("zstd" "-T0" "-${COMPRESSION_LEVEL}")
   
-  local pipeline_str="${tar_cmd[*]} | ${PV_CMD} | ${zstd_cmd[*]}"
+  local pipeline_str="${tar_cmd[*]} | ${PV_CMD}"
+  if [ "$NO_COMPRESS" -eq 0 ]; then
+    pipeline_str+=" | ${zstd_cmd[*]}"
+  fi
   if [ "$is_gpg_used" -eq 1 ]; then
       pipeline_str+=" | ${gpg_cmd[*]}"
   fi
@@ -604,6 +615,7 @@ trap cleanup EXIT INT TERM
 # --- Configuration ---
 readonly BASE_NAME="${OUTPUT_BASE}"
 readonly IS_GPG_USED=${is_gpg_used}
+readonly NO_COMPRESS=${NO_COMPRESS}
 readonly SELF_ERASE=${BURN_AFTER_READING}
 readonly USE_ENCRYPTED_TMPFS=${USE_ENCRYPTED_TMPFS}
 
@@ -664,7 +676,8 @@ run_decompress() {
     echo "--- Encrypted Real-Time Data Exchange Listener ---"
 
     # Check required tools for listen mode
-    local listen_tools=("nc" "zstd" "tar")
+    local listen_tools=("nc" "tar")
+    [ "\$NO_COMPRESS" -eq 0 ] && listen_tools+=("zstd")
     [ "\$IS_GPG_USED" -eq 1 ] && listen_tools+=("gpg")
     for tool in "\${listen_tools[@]}"; do
       if ! command -v "\$tool" >/dev/null; then
@@ -701,13 +714,21 @@ run_decompress() {
       # Temporarily disable errexit so we can capture the pipeline status
       # and always display signature verification results
       set +e
-      "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
+      if [ "\$NO_COMPRESS" -eq 0 ]; then
+        "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf -
+      else
+        "\${nc_listen_cmd[@]}" | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | tar -xvf -
+      fi
       local listen_status=\$?
       set -e
     else
       echo "--> Waiting for incoming data..."
       set +e
-      "\${nc_listen_cmd[@]}" | zstd -d | tar -xvf -
+      if [ "\$NO_COMPRESS" -eq 0 ]; then
+        "\${nc_listen_cmd[@]}" | zstd -d | tar -xvf -
+      else
+        "\${nc_listen_cmd[@]}" | tar -xvf -
+      fi
       local listen_status=\$?
       set -e
     fi
@@ -733,7 +754,8 @@ run_decompress() {
 
   echo "--- Decompression & Verification Script ---"
   echo "--> Checking for required tools..."
-  local required_tools=("tar" "zstd" "sha512sum")
+  local required_tools=("tar" "sha512sum")
+  [ "\$NO_COMPRESS" -eq 0 ] && required_tools+=("zstd")
   [ "\$IS_GPG_USED" -eq 1 ] && required_tools+=("gpg")
   [ "\$USE_ENCRYPTED_TMPFS" -eq 1 ] && required_tools+=("cryptsetup" "mkfs.ext4")
   for tool in \${required_tools[@]}; do
@@ -745,6 +767,7 @@ run_decompress() {
   echo "    All required tools found."
 
   local archive_ext=".tar.zst"
+  [ "\$NO_COMPRESS" -eq 1 ] && archive_ext=".tar"
   local final_ext="\$archive_ext"
   [ "\$IS_GPG_USED" -eq 1 ] && final_ext="\${archive_ext}.gpg"
 
@@ -790,9 +813,9 @@ run_decompress() {
               read -r GPG_PASSPHRASE
           fi
           echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
-          eval "\$source_stream_cmd" | \$pv_cmd | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d | zstd -d | tar -tvf -
+          eval "\$source_stream_cmd" | \$pv_cmd | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d | if [ "\$NO_COMPRESS" -eq 0 ]; then zstd -d; else cat; fi | tar -tvf -
       else
-          eval "\$source_stream_cmd" | \$pv_cmd | zstd -d | tar -tvf -
+          eval "\$source_stream_cmd" | \$pv_cmd | if [ "\$NO_COMPRESS" -eq 0 ]; then zstd -d; else cat; fi | tar -tvf -
       fi
   else
       echo ""
@@ -834,9 +857,9 @@ run_decompress() {
               read -r GPG_PASSPHRASE
           fi
           echo "\$GPG_PASSPHRASE" > "\$passphrase_file"
-          eval "\$source_stream_cmd" | \$pv_cmd | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | zstd -d | tar -xvf - -C "\$extract_dir"
+          eval "\$source_stream_cmd" | \$pv_cmd | gpg --batch --pinentry-mode loopback --passphrase-file "\$passphrase_file" --trust-model always -d 2> "\$gpg_stderr_file" | if [ "\$NO_COMPRESS" -eq 0 ]; then zstd -d; else cat; fi | tar -xvf - -C "\$extract_dir"
       else
-          eval "\$source_stream_cmd" | \$pv_cmd | zstd -d | tar -xvf - -C "\$extract_dir"
+          eval "\$source_stream_cmd" | \$pv_cmd | if [ "\$NO_COMPRESS" -eq 0 ]; then zstd -d; else cat; fi | tar -xvf - -C "\$extract_dir"
       fi
       
       if [ "\$IS_GPG_USED" -eq 1 ]; then
